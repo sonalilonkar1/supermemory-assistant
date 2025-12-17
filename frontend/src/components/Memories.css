@@ -1,0 +1,208 @@
+.memories-container {
+  background: white;
+  border-radius: 12px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+  padding: 1.5rem;
+  min-height: 400px;
+}
+
+.memories-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.5rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.memories-header h2 {
+  font-size: 1.5rem;
+  color: #333;
+}
+
+.refresh-btn {
+  padding: 0.5rem 1rem;
+  background: #667eea;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: background 0.2s;
+}
+
+.refresh-btn:hover {
+  background: #5568d3;
+}
+
+.loading {
+  text-align: center;
+  padding: 3rem;
+  color: #666;
+  font-size: 1.1rem;
+}
+
+.empty-state {
+  text-align: center;
+  padding: 3rem;
+  color: #666;
+}
+
+.empty-state p {
+  margin: 0.5rem 0;
+}
+
+.empty-hint {
+  font-size: 0.9rem;
+  color: #999;
+}
+
+.memories-list {
+  display: grid;
+  gap: 1rem;
+}
+
+.memory-card {
+  background: #f9f9f9;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  padding: 1.25rem;
+  transition: box-shadow 0.2s;
+}
+
+.memory-card:hover {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.memory-content {
+  margin-bottom: 1rem;
+}
+
+.memory-content p {
+  margin: 0 0 0.75rem 0;
+  line-height: 1.6;
+  color: #333;
+}
+
+.memory-metadata {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.metadata-tag {
+  background: #667eea;
+  color: white;
+  padding: 0.25rem 0.75rem;
+  border-radius: 12px;
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.metadata-date {
+  color: #999;
+  font-size: 0.85rem;
+}
+
+.memory-actions {
+  display: flex;
+  gap: 0.5rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid #e0e0e0;
+}
+
+.edit-btn,
+.delete-btn {
+  padding: 0.5rem 1rem;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: all 0.2s;
+}
+
+.edit-btn {
+  background: #f0f0f0;
+  color: #333;
+}
+
+.edit-btn:hover {
+  background: #e0e0e0;
+}
+
+.delete-btn {
+  background: #fee;
+  color: #c33;
+}
+
+.delete-btn:hover {
+  background: #fdd;
+}
+
+.memory-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.edit-textarea {
+  width: 100%;
+  padding: 0.75rem;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 0.95rem;
+  font-family: inherit;
+  resize: vertical;
+  outline: none;
+}
+
+.edit-textarea:focus {
+  border-color: #667eea;
+}
+
+.edit-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.save-btn,
+.cancel-btn {
+  padding: 0.5rem 1rem;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.save-btn {
+  background: #667eea;
+  color: white;
+}
+
+.save-btn:hover {
+  background: #5568d3;
+}
+
+.cancel-btn {
+  background: #f0f0f0;
+  color: #333;
+}
+
+.cancel-btn:hover {
+  background: #e0e0e0;
+}
+
+@media (max-width: 768px) {
+  .memories-container {
+    padding: 1rem;
+  }
+
+  .memories-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1rem;
+  }
+}
+
