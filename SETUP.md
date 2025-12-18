@@ -11,7 +11,7 @@ pip install -r requirements.txt
 
 Create a `.env` file in the `backend` directory with:
 ```
-OPENAI_API_KEY=your_key_here
+GEMINI_API_KEY=your_key_here
 SUPERMEMORY_API_KEY=your_key_here
 SUPERMEMORY_API_URL=https://api.supermemory.ai/v3
 PARALLEL_API_KEY=your_key_here  # Optional
@@ -45,7 +45,7 @@ Open your browser to `http://localhost:3000`
 
 ## Getting API Keys
 
-1. **OpenAI**: Get from https://platform.openai.com/api-keys
+1. **Google Gemini**: Get from https://ai.google.dev/ (click "Get API Key")
 2. **Supermemory**: Get from https://supermemory.ai (sign up and get API key)
 3. **Parallel.ai**: Get from https://parallel.ai (optional)
 4. **Exa.ai**: Get from https://exa.ai (optional)

@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
 from dotenv import load_dotenv
-import openai
+import google.genai as genai
 from datetime import datetime
 import requests
 import json
@@ -13,21 +13,27 @@ app = Flask(__name__)
 CORS(app)
 
 # Configuration
-OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 SUPERMEMORY_API_KEY = os.getenv('SUPERMEMORY_API_KEY')
 SUPERMEMORY_API_URL = os.getenv('SUPERMEMORY_API_URL', 'https://api.supermemory.ai/v3')
 PARALLEL_API_KEY = os.getenv('PARALLEL_API_KEY')
 EXA_API_KEY = os.getenv('EXA_API_KEY')
 
 # Validate required API keys
-if not OPENAI_API_KEY:
-    print("WARNING: OPENAI_API_KEY not set. Chat functionality will not work.")
+if not GEMINI_API_KEY:
+    print("WARNING: GEMINI_API_KEY not set. Chat functionality will not work.")
 if not SUPERMEMORY_API_KEY:
     print("WARNING: SUPERMEMORY_API_KEY not set. Memory functionality will not work.")
 
-# Initialize OpenAI client
-from openai import OpenAI
-client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+# Initialize Gemini client
+if GEMINI_API_KEY:
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    # Use gemini-2.5-flash (fast) or gemini-2.5-pro (better quality)
+    # Available models: gemini-2.5-flash, gemini-2.5-pro, gemini-pro-latest
+    model_name = 'gemini-2.5-flash'  # Fast and efficient, or use 'gemini-2.5-pro' for better quality
+else:
+    client = None
+    model_name = None
 
 # Default profile ID - can be customized per user
 DEFAULT_PROFILE_ID = os.getenv('SUPERMEMORY_PROFILE_ID', 'default-profile')
@@ -75,16 +81,21 @@ def search_memories(profile_id, query, mode=None, limit=5):
 
 def create_memory(profile_id, text, metadata=None):
     """Create a new memory using Supermemory API"""
+    # Build container tags
+    container_tags = [profile_id] if profile_id else []
+    if metadata and metadata.get('mode'):
+        container_tags.append(f"{profile_id}-{metadata.get('mode')}")
+    
     try:
-        # Try /memories endpoint first
-        url = f'{SUPERMEMORY_API_URL}/memories'
+        # Supermemory API v3 uses /documents endpoint for creating memories
+        # Try format with 'content' field first
+        url = f'{SUPERMEMORY_API_URL}/documents'
         payload = {
-            'text': text,
-            'metadata': metadata or {},
-            'containerTags': [profile_id] if profile_id else []
+            'content': text,
+            'containerTags': container_tags,
         }
-        if metadata and metadata.get('mode'):
-            payload['containerTags'] = [f"{profile_id}-{metadata.get('mode')}"]
+        if metadata:
+            payload['metadata'] = metadata
         
         response = requests.post(
             url,
@@ -93,10 +104,38 @@ def create_memory(profile_id, text, metadata=None):
         )
         response.raise_for_status()
         return response.json()
+    except requests.exceptions.HTTPError as e:
+        # Try alternative endpoint format if first fails
+        if e.response.status_code == 400:
+            try:
+                # Alternative format: try with 'text' instead of 'content'
+                url = f'{SUPERMEMORY_API_URL}/documents'
+                payload = {
+                    'text': text,
+                    'containerTags': container_tags,
+                }
+                if metadata:
+                    payload['metadata'] = metadata
+                
+                response = requests.post(
+                    url,
+                    headers=get_supermemory_headers(),
+                    json=payload
+                )
+                response.raise_for_status()
+                return response.json()
+            except Exception as e2:
+                error_detail = e2.response.text if hasattr(e2, 'response') and hasattr(e2.response, 'text') else str(e2)
+                print(f"Error creating memory (alternative format): {e2}")
+                print(f"Response: {error_detail}")
+        else:
+            error_detail = e.response.text if hasattr(e, 'response') and hasattr(e.response, 'text') else str(e)
+            print(f"Error creating memory: {e}")
+            print(f"Response: {error_detail}")
     except Exception as e:
         print(f"Error creating memory: {e}")
-        # Don't fail the entire request if memory creation fails
-        return None
+    # Don't fail the entire request if memory creation fails
+    return None
 
 def get_memories(profile_id, mode=None, limit=50):
     """Get memories for a profile"""
@@ -302,32 +341,37 @@ Use the user's memories to provide personalized responses. Be proactive and help
 
 Provide a helpful response. If appropriate, break your response into multiple parts for clarity."""
 
-        # Call OpenAI
-        if not client:
-            raise ValueError("OpenAI client not initialized. Please set OPENAI_API_KEY in your .env file.")
+        # Call Gemini
+        if not client or not model_name:
+            raise ValueError("Gemini client not initialized. Please set GEMINI_API_KEY in your .env file.")
         
         try:
-            response = client.chat.completions.create(
-                model='gpt-3.5-turbo',  # Changed from gpt-4 to gpt-3.5-turbo for better compatibility
-                messages=[
-                    {'role': 'system', 'content': system_prompt},
-                    {'role': 'user', 'content': user_prompt}
-                ],
-                temperature=0.7,
-                max_tokens=1000
+            # Combine system and user prompts for Gemini
+            full_prompt = f"{system_prompt}\n\n{user_prompt}"
+            
+            # Use the new google.genai API
+            from google.genai import types
+            response = client.models.generate_content(
+                model=model_name,
+                contents=full_prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.7,
+                    max_output_tokens=1000,
+                )
             )
-            assistant_reply = response.choices[0].message.content
-        except Exception as openai_error:
-            # Handle OpenAI API errors gracefully
-            error_str = str(openai_error)
-            if 'quota' in error_str.lower() or 'insufficient_quota' in error_str.lower() or '429' in error_str:
-                assistant_reply = f"I'm sorry, but I've reached my API quota limit. Please check your OpenAI billing or try again later. In the meantime, here's a basic response:\n\nBased on your message '{user_message}', I'd be happy to help once the API quota is restored."
+            # Extract text from response
+            assistant_reply = response.text if hasattr(response, 'text') else str(response.candidates[0].content.parts[0].text)
+        except Exception as gemini_error:
+            # Handle Gemini API errors gracefully
+            error_str = str(gemini_error)
+            if 'quota' in error_str.lower() or 'quota_exceeded' in error_str.lower() or '429' in error_str:
+                assistant_reply = f"I'm sorry, but I've reached my API quota limit. Please check your Google Cloud billing or try again later. In the meantime, here's a basic response:\n\nBased on your message '{user_message}', I'd be happy to help once the API quota is restored."
             elif 'rate_limit' in error_str.lower() or '429' in error_str:
                 assistant_reply = f"I'm experiencing rate limits. Please wait a moment and try again. Your message was: '{user_message}'"
             else:
                 # For other errors, provide a helpful fallback
                 assistant_reply = f"I encountered an issue connecting to the AI service. Your message was: '{user_message}'. Please check your API configuration or try again later."
-            print(f"OpenAI API error (using fallback): {openai_error}")
+            print(f"Gemini API error (using fallback): {gemini_error}")
         
         # Split response into multiple messages if it contains clear sections
         replies = [assistant_reply]
@@ -363,18 +407,18 @@ Provide a helpful response. If appropriate, break your response into multiple pa
         print(f"Traceback: {error_trace}")
         
         # Provide user-friendly error messages
-        if 'quota' in error_str.lower() or 'insufficient_quota' in error_str.lower():
-            error_message = 'OpenAI API quota exceeded. Please check your OpenAI billing or upgrade your plan.'
+        if 'quota' in error_str.lower() or 'insufficient_quota' in error_str.lower() or 'quota_exceeded' in error_str.lower():
+            error_message = 'Gemini API quota exceeded. Please check your Google Cloud billing or upgrade your plan.'
         elif 'rate_limit' in error_str.lower():
             error_message = 'Rate limit exceeded. Please wait a moment and try again.'
         elif 'api_key' in error_str.lower() or 'authentication' in error_str.lower():
-            error_message = 'API key issue. Please check your OPENAI_API_KEY in the .env file.'
+            error_message = 'API key issue. Please check your GEMINI_API_KEY in the .env file.'
         else:
             error_message = f'An error occurred: {error_str}. Please check backend logs for details.'
         
         return jsonify({
             'error': error_message,
-            'details': 'Make sure OPENAI_API_KEY is set correctly in your .env file and you have sufficient quota.'
+            'details': 'Make sure GEMINI_API_KEY is set correctly in your .env file and you have sufficient quota.'
         }), 500
 
 @app.route('/api/proactive', methods=['GET'])
@@ -410,20 +454,28 @@ Examples:
 
 Keep it to one sentence, friendly and helpful."""
 
-        if not client:
+        if not client or not model_name:
             return jsonify({'message': None})
         
-        response = client.chat.completions.create(
-            model='gpt-3.5-turbo',  # Changed from gpt-4 to gpt-3.5-turbo for better compatibility
-            messages=[
-                {'role': 'system', 'content': 'You are a helpful assistant that generates proactive conversation starters.'},
-                {'role': 'user', 'content': prompt}
-            ],
-            temperature=0.8,
-            max_tokens=150
-        )
-        
-        message = response.choices[0].message.content.strip()
+        try:
+            system_context = 'You are a helpful assistant that generates proactive conversation starters.'
+            full_prompt = f"{system_context}\n\n{prompt}"
+            
+            from google.genai import types
+            response = client.models.generate_content(
+                model=model_name,
+                contents=full_prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.8,
+                    max_output_tokens=150,
+                )
+            )
+            # Extract text from response
+            message = response.text if hasattr(response, 'text') else str(response.candidates[0].content.parts[0].text)
+            message = message.strip()
+        except Exception as e:
+            print(f"Error generating proactive message: {e}")
+            return jsonify({'message': None})
         
         return jsonify({'message': message})
         

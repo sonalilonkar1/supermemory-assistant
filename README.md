@@ -1,6 +1,6 @@
 # Supermemory Assistant
 
-A full-stack personal assistant with three specialized modes, powered by Supermemory API for long-term memory, OpenAI for intelligent responses, and web search capabilities.
+A full-stack personal assistant with three specialized modes, powered by Supermemory API for long-term memory, Google Gemini for intelligent responses, and web search capabilities.
 
 ## Features
 
@@ -24,7 +24,7 @@ A full-stack personal assistant with three specialized modes, powered by Superme
 - **Backend**: Python + Flask
 - **Frontend**: React + Vite
 - **Memory**: Supermemory API
-- **LLM**: OpenAI GPT-4
+- **LLM**: Google Gemini Pro
 - **Web Search**: Parallel.ai / Exa.ai
 
 ## Project Structure
@@ -55,7 +55,7 @@ supermemory-assistant/
 - Python 3.8+
 - Node.js 16+
 - API Keys:
-  - OpenAI API key
+  - Google Gemini API key
   - Supermemory API key
   - Parallel.ai or Exa.ai API key (optional, for web search)
 
@@ -84,7 +84,7 @@ cp .env.example .env
 
 5. Edit `.env` and add your API keys:
 ```
-OPENAI_API_KEY=your_openai_api_key_here
+GEMINI_API_KEY=your_gemini_api_key_here
 SUPERMEMORY_API_KEY=your_supermemory_api_key_here
 SUPERMEMORY_API_URL=https://api.supermemory.ai/v3
 SUPERMEMORY_PROFILE_ID=default-profile
@@ -213,7 +213,7 @@ The memory graph visualizes memories as nodes, with connections based on mode an
 
 | Variable | Description | Required |
 |----------|-------------|----------|
-| `OPENAI_API_KEY` | OpenAI API key for LLM | Yes |
+| `GEMINI_API_KEY` | Google Gemini API key for LLM | Yes |
 | `SUPERMEMORY_API_KEY` | Supermemory API key | Yes |
 | `SUPERMEMORY_API_URL` | Supermemory API base URL | No (defaults to v3) |
 | `SUPERMEMORY_PROFILE_ID` | Default profile ID | No |
@@ -231,6 +231,6 @@ MIT
 ## Acknowledgments
 
 - [Supermemory](https://supermemory.ai) for the memory API
-- [OpenAI](https://openai.com) for GPT-4
+- [Google Gemini](https://ai.google.dev/) for intelligent responses
 - [Parallel.ai](https://parallel.ai) and [Exa.ai](https://exa.ai) for web search capabilities
 
