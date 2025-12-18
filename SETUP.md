@@ -20,7 +20,14 @@ EXA_API_KEY=your_key_here  # Optional
 
 Run the backend:
 ```bash
-python app.py
+# Option 1: Use python3 (recommended if you have a python alias)
+python3 app.py
+
+# Option 2: Use the run script
+./run.sh
+
+# Option 3: Use the venv Python directly
+./venv/bin/python3 app.py
 ```
 
 ## Step 2: Frontend Setup
@@ -46,7 +53,7 @@ Open your browser to `http://localhost:3000`
 ## Troubleshooting
 
 - **Backend won't start**: Make sure all dependencies are installed and `.env` file exists
-- **Frontend can't connect**: Ensure backend is running on port 5000
+- **Frontend can't connect**: Ensure backend is running on port 5001
 - **API errors**: Check that your API keys are correct and have sufficient credits
 - **CORS errors**: The backend has CORS enabled, but if issues persist, check the Flask-CORS configuration
 

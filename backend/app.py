@@ -19,16 +19,24 @@ SUPERMEMORY_API_URL = os.getenv('SUPERMEMORY_API_URL', 'https://api.supermemory.
 PARALLEL_API_KEY = os.getenv('PARALLEL_API_KEY')
 EXA_API_KEY = os.getenv('EXA_API_KEY')
 
+# Validate required API keys
+if not OPENAI_API_KEY:
+    print("WARNING: OPENAI_API_KEY not set. Chat functionality will not work.")
+if not SUPERMEMORY_API_KEY:
+    print("WARNING: SUPERMEMORY_API_KEY not set. Memory functionality will not work.")
+
 # Initialize OpenAI client
 from openai import OpenAI
-client = OpenAI(api_key=OPENAI_API_KEY)
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 # Default profile ID - can be customized per user
 DEFAULT_PROFILE_ID = os.getenv('SUPERMEMORY_PROFILE_ID', 'default-profile')
 
 def get_supermemory_headers():
     """Get headers for Supermemory API requests"""
+    # Supermemory API uses x-api-key header, but also supports Authorization Bearer
     return {
+        'x-api-key': SUPERMEMORY_API_KEY,
         'Authorization': f'Bearer {SUPERMEMORY_API_KEY}',
         'Content-Type': 'application/json'
     }
@@ -36,14 +44,15 @@ def get_supermemory_headers():
 def search_memories(profile_id, query, mode=None, limit=5):
     """Search memories using Supermemory API"""
     try:
+        # Try the search endpoint
         url = f'{SUPERMEMORY_API_URL}/search'
         payload = {
-            'profileId': profile_id,
             'query': query,
-            'limit': limit
+            'limit': limit,
+            'containerTags': [profile_id] if profile_id else []
         }
         if mode:
-            payload['tags'] = [mode]
+            payload['containerTags'] = [f"{profile_id}-{mode}"]
         
         response = requests.post(
             url,
@@ -51,20 +60,31 @@ def search_memories(profile_id, query, mode=None, limit=5):
             json=payload
         )
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+        # Handle different response formats
+        if 'results' in data:
+            return data
+        elif 'documents' in data:
+            return {'results': data.get('documents', [])}
+        else:
+            return {'results': data if isinstance(data, list) else []}
     except Exception as e:
         print(f"Error searching memories: {e}")
+        # Return empty results instead of failing
         return {'results': []}
 
 def create_memory(profile_id, text, metadata=None):
     """Create a new memory using Supermemory API"""
     try:
+        # Try /memories endpoint first
         url = f'{SUPERMEMORY_API_URL}/memories'
         payload = {
-            'profileId': profile_id,
             'text': text,
-            'metadata': metadata or {}
+            'metadata': metadata or {},
+            'containerTags': [profile_id] if profile_id else []
         }
+        if metadata and metadata.get('mode'):
+            payload['containerTags'] = [f"{profile_id}-{metadata.get('mode')}"]
         
         response = requests.post(
             url,
@@ -75,26 +95,63 @@ def create_memory(profile_id, text, metadata=None):
         return response.json()
     except Exception as e:
         print(f"Error creating memory: {e}")
+        # Don't fail the entire request if memory creation fails
         return None
 
 def get_memories(profile_id, mode=None, limit=50):
     """Get memories for a profile"""
     try:
-        url = f'{SUPERMEMORY_API_URL}/memories'
-        params = {
-            'profileId': profile_id,
-            'limit': limit
+        # Supermemory API v3 uses /documents/documents endpoint with POST
+        url = f'{SUPERMEMORY_API_URL}/documents/documents'
+        payload = {
+            'page': 1,
+            'limit': limit,
+            'sort': 'createdAt',
+            'order': 'desc',
+            'containerTags': [profile_id]  # Use containerTags instead of profileId
         }
         if mode:
-            params['tags'] = mode
+            payload['containerTags'] = [f"{profile_id}-{mode}"]
         
-        response = requests.get(
+        response = requests.post(
             url,
             headers=get_supermemory_headers(),
-            params=params
+            json=payload
         )
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+        # Handle response format
+        if 'documents' in data:
+            return {'memories': data.get('documents', [])}
+        elif isinstance(data, list):
+            return {'memories': data}
+        else:
+            return {'memories': []}
+    except requests.exceptions.HTTPError as e:
+        # Fallback: try GET /memories endpoint (older API format)
+        if e.response.status_code == 404:
+            try:
+                url = f'{SUPERMEMORY_API_URL}/memories'
+                params = {
+                    'profileId': profile_id,
+                    'limit': limit
+                }
+                if mode:
+                    params['tags'] = mode
+                response = requests.get(
+                    url,
+                    headers=get_supermemory_headers(),
+                    params=params
+                )
+                response.raise_for_status()
+                data = response.json()
+                return {'memories': data.get('memories', data if isinstance(data, list) else [])}
+            except Exception as e2:
+                print(f"Error getting memories (fallback): {e2}")
+                return {'memories': []}
+        else:
+            print(f"Error getting memories: {e}")
+            return {'memories': []}
     except Exception as e:
         print(f"Error getting memories: {e}")
         return {'memories': []}
@@ -246,17 +303,31 @@ Use the user's memories to provide personalized responses. Be proactive and help
 Provide a helpful response. If appropriate, break your response into multiple parts for clarity."""
 
         # Call OpenAI
-        response = client.chat.completions.create(
-            model='gpt-4',
-            messages=[
-                {'role': 'system', 'content': system_prompt},
-                {'role': 'user', 'content': user_prompt}
-            ],
-            temperature=0.7,
-            max_tokens=1000
-        )
+        if not client:
+            raise ValueError("OpenAI client not initialized. Please set OPENAI_API_KEY in your .env file.")
         
-        assistant_reply = response.choices[0].message.content
+        try:
+            response = client.chat.completions.create(
+                model='gpt-3.5-turbo',  # Changed from gpt-4 to gpt-3.5-turbo for better compatibility
+                messages=[
+                    {'role': 'system', 'content': system_prompt},
+                    {'role': 'user', 'content': user_prompt}
+                ],
+                temperature=0.7,
+                max_tokens=1000
+            )
+            assistant_reply = response.choices[0].message.content
+        except Exception as openai_error:
+            # Handle OpenAI API errors gracefully
+            error_str = str(openai_error)
+            if 'quota' in error_str.lower() or 'insufficient_quota' in error_str.lower() or '429' in error_str:
+                assistant_reply = f"I'm sorry, but I've reached my API quota limit. Please check your OpenAI billing or try again later. In the meantime, here's a basic response:\n\nBased on your message '{user_message}', I'd be happy to help once the API quota is restored."
+            elif 'rate_limit' in error_str.lower() or '429' in error_str:
+                assistant_reply = f"I'm experiencing rate limits. Please wait a moment and try again. Your message was: '{user_message}'"
+            else:
+                # For other errors, provide a helpful fallback
+                assistant_reply = f"I encountered an issue connecting to the AI service. Your message was: '{user_message}'. Please check your API configuration or try again later."
+            print(f"OpenAI API error (using fallback): {openai_error}")
         
         # Split response into multiple messages if it contains clear sections
         replies = [assistant_reply]
@@ -285,8 +356,26 @@ Provide a helpful response. If appropriate, break your response into multiple pa
         })
         
     except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        error_str = str(e)
         print(f"Error in chat endpoint: {e}")
-        return jsonify({'error': str(e)}), 500
+        print(f"Traceback: {error_trace}")
+        
+        # Provide user-friendly error messages
+        if 'quota' in error_str.lower() or 'insufficient_quota' in error_str.lower():
+            error_message = 'OpenAI API quota exceeded. Please check your OpenAI billing or upgrade your plan.'
+        elif 'rate_limit' in error_str.lower():
+            error_message = 'Rate limit exceeded. Please wait a moment and try again.'
+        elif 'api_key' in error_str.lower() or 'authentication' in error_str.lower():
+            error_message = 'API key issue. Please check your OPENAI_API_KEY in the .env file.'
+        else:
+            error_message = f'An error occurred: {error_str}. Please check backend logs for details.'
+        
+        return jsonify({
+            'error': error_message,
+            'details': 'Make sure OPENAI_API_KEY is set correctly in your .env file and you have sufficient quota.'
+        }), 500
 
 @app.route('/api/proactive', methods=['GET'])
 def proactive():
@@ -321,8 +410,11 @@ Examples:
 
 Keep it to one sentence, friendly and helpful."""
 
+        if not client:
+            return jsonify({'message': None})
+        
         response = client.chat.completions.create(
-            model='gpt-4',
+            model='gpt-3.5-turbo',  # Changed from gpt-4 to gpt-3.5-turbo for better compatibility
             messages=[
                 {'role': 'system', 'content': 'You are a helpful assistant that generates proactive conversation starters.'},
                 {'role': 'user', 'content': prompt}

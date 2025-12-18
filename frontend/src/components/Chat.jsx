@@ -97,9 +97,28 @@ function Chat({ mode, userId }) {
       }
     } catch (error) {
       console.error('Error sending message:', error)
+      let errorMessage = 'Sorry, I encountered an error. Please try again.'
+      
+      // Provide more specific error messages
+      if (error.response?.status === 500) {
+        const errorData = error.response?.data
+        if (errorData?.error) {
+          errorMessage = errorData.error
+          if (errorData.details) {
+            errorMessage += `\n\n${errorData.details}`
+          }
+        } else if (errorData?.message) {
+          errorMessage = errorData.message
+        }
+      } else if (error.response?.status === 429) {
+        errorMessage = 'Rate limit exceeded. Please wait a moment and try again.'
+      } else if (error.message) {
+        errorMessage = `Error: ${error.message}`
+      }
+      
       setMessages(prev => [...prev, {
         role: 'assistant',
-        content: 'Sorry, I encountered an error. Please try again.',
+        content: errorMessage,
         timestamp: new Date()
       }])
     } finally {
