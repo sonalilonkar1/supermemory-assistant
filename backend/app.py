@@ -6,11 +6,27 @@ import google.genai as genai
 from datetime import datetime
 import requests
 import json
+from models import db, User
+from auth import (
+    hash_password, verify_password, generate_token, 
+    verify_token, get_user_from_token, generate_user_id, init_bcrypt
+)
 
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app)
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', 'sqlite:///supermemory.db')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'your-secret-key-change-in-production')
+
+# Initialize extensions
+db.init_app(app)
+init_bcrypt(app)
+CORS(app, supports_credentials=True)
+
+# Create tables
+with app.app_context():
+    db.create_all()
 
 # Configuration
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
@@ -49,16 +65,19 @@ def get_supermemory_headers():
 
 def search_memories(profile_id, query, mode=None, limit=5):
     """Search memories using Supermemory API"""
+    # Build container tags
+    container_tags = [profile_id] if profile_id else []
+    if mode:
+        container_tags = [f"{profile_id}-{mode}"]
+    
     try:
-        # Try the search endpoint
-        url = f'{SUPERMEMORY_API_URL}/search'
+        # Try /search/search endpoint (v3 format)
+        url = f'{SUPERMEMORY_API_URL}/search/search'
         payload = {
             'query': query,
             'limit': limit,
-            'containerTags': [profile_id] if profile_id else []
+            'containerTags': container_tags
         }
-        if mode:
-            payload['containerTags'] = [f"{profile_id}-{mode}"]
         
         response = requests.post(
             url,
@@ -74,10 +93,43 @@ def search_memories(profile_id, query, mode=None, limit=5):
             return {'results': data.get('documents', [])}
         else:
             return {'results': data if isinstance(data, list) else []}
+    except requests.exceptions.HTTPError as e:
+        # Try alternative endpoint format if first fails
+        if e.response.status_code == 400 or e.response.status_code == 404:
+            try:
+                # Try /search endpoint (simpler format)
+                url = f'{SUPERMEMORY_API_URL}/search'
+                payload = {
+                    'query': query,
+                    'limit': limit,
+                    'containerTags': container_tags
+                }
+                
+                response = requests.post(
+                    url,
+                    headers=get_supermemory_headers(),
+                    json=payload
+                )
+                response.raise_for_status()
+                data = response.json()
+                if 'results' in data:
+                    return data
+                elif 'documents' in data:
+                    return {'results': data.get('documents', [])}
+                else:
+                    return {'results': data if isinstance(data, list) else []}
+            except Exception as e2:
+                error_detail = e2.response.text if hasattr(e2, 'response') and hasattr(e2.response, 'text') else str(e2)
+                print(f"Error searching memories (fallback): {e2}")
+                print(f"Response: {error_detail}")
+        else:
+            error_detail = e.response.text if hasattr(e, 'response') and hasattr(e.response, 'text') else str(e)
+            print(f"Error searching memories: {e}")
+            print(f"Response: {error_detail}")
     except Exception as e:
         print(f"Error searching memories: {e}")
-        # Return empty results instead of failing
-        return {'results': []}
+    # Return empty results instead of failing - chat will work without memory search
+    return {'results': []}
 
 def create_memory(profile_id, text, metadata=None):
     """Create a new memory using Supermemory API"""
@@ -284,12 +336,116 @@ def health():
     """Health check endpoint"""
     return jsonify({'status': 'ok'})
 
+# Authentication endpoints
+@app.route('/api/auth/signup', methods=['POST'])
+def signup():
+    """User registration endpoint"""
+    try:
+        data = request.json
+        email = data.get('email', '').strip().lower()
+        password = data.get('password', '')
+        name = data.get('name', '').strip()
+        
+        # Validation
+        if not email or not password:
+            return jsonify({'error': 'Email and password are required'}), 400
+        
+        if len(password) < 6:
+            return jsonify({'error': 'Password must be at least 6 characters'}), 400
+        
+        # Check if user exists
+        existing_user = User.query.filter_by(email=email).first()
+        if existing_user:
+            return jsonify({'error': 'User with this email already exists'}), 400
+        
+        # Create new user
+        user_id = generate_user_id()
+        password_hash = hash_password(password)
+        
+        new_user = User(
+            id=user_id,
+            email=email,
+            password_hash=password_hash,
+            name=name or email.split('@')[0]
+        )
+        
+        db.session.add(new_user)
+        db.session.commit()
+        
+        # Generate token
+        token = generate_token(user_id)
+        
+        return jsonify({
+            'token': token,
+            'user': new_user.to_dict()
+        }), 201
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error in signup: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': 'Failed to create account'}), 500
+
+@app.route('/api/auth/login', methods=['POST'])
+def login():
+    """User login endpoint"""
+    try:
+        data = request.json
+        email = data.get('email', '').strip().lower()
+        password = data.get('password', '')
+        
+        if not email or not password:
+            return jsonify({'error': 'Email and password are required'}), 400
+        
+        # Find user
+        user = User.query.filter_by(email=email).first()
+        if not user:
+            return jsonify({'error': 'Invalid email or password'}), 401
+        
+        # Verify password
+        if not verify_password(user.password_hash, password):
+            return jsonify({'error': 'Invalid email or password'}), 401
+        
+        # Generate token
+        token = generate_token(user.id)
+        
+        return jsonify({
+            'token': token,
+            'user': user.to_dict()
+        }), 200
+        
+    except Exception as e:
+        print(f"Error in login: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': 'Failed to login'}), 500
+
+@app.route('/api/auth/me', methods=['GET'])
+def get_current_user():
+    """Get current authenticated user"""
+    try:
+        user = get_user_from_token(request)
+        if not user:
+            return jsonify({'error': 'Not authenticated'}), 401
+        
+        return jsonify({'user': user.to_dict()}), 200
+    except Exception as e:
+        print(f"Error getting current user: {e}")
+        return jsonify({'error': 'Failed to get user'}), 500
+
 @app.route('/api/chat', methods=['POST'])
 def chat():
     """Main chat endpoint"""
     try:
+        # Get authenticated user or use default
+        user = get_user_from_token(request)
+        user_id = user.id if user else 'default'
+        
         data = request.json
-        user_id = data.get('userId', 'default')
+        # Override with authenticated user if available
+        if not user:
+            user_id = data.get('userId', 'default')
         mode = data.get('mode', 'student')
         messages = data.get('messages', [])
         use_search = data.get('useSearch', False)
@@ -356,11 +512,32 @@ Provide a helpful response. If appropriate, break your response into multiple pa
                 contents=full_prompt,
                 config=types.GenerateContentConfig(
                     temperature=0.7,
-                    max_output_tokens=1000,
+                    max_output_tokens=2048,  # Increased from 1000 to allow longer responses
                 )
             )
-            # Extract text from response
-            assistant_reply = response.text if hasattr(response, 'text') else str(response.candidates[0].content.parts[0].text)
+            # Extract text from response - check for truncation
+            if hasattr(response, 'text'):
+                assistant_reply = response.text
+            elif hasattr(response, 'candidates') and response.candidates:
+                # Fallback: extract from candidates
+                candidate = response.candidates[0]
+                if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                    assistant_reply = ''.join([part.text for part in candidate.content.parts if hasattr(part, 'text')])
+                else:
+                    assistant_reply = str(candidate)
+            else:
+                assistant_reply = str(response)
+            
+            # Check if response was truncated and log for debugging
+            if hasattr(response, 'candidates') and response.candidates:
+                finish_reason = getattr(response.candidates[0], 'finish_reason', None)
+                if finish_reason:
+                    print(f"Finish reason: {finish_reason}")
+                    if 'MAX_TOKENS' in str(finish_reason):
+                        assistant_reply += "\n\n[Note: Response may be truncated due to token limit. Ask me to continue if needed.]"
+            
+            # Log response length for debugging
+            print(f"Response length: {len(assistant_reply)} characters")
         except Exception as gemini_error:
             # Handle Gemini API errors gracefully
             error_str = str(gemini_error)
@@ -374,12 +551,19 @@ Provide a helpful response. If appropriate, break your response into multiple pa
             print(f"Gemini API error (using fallback): {gemini_error}")
         
         # Split response into multiple messages if it contains clear sections
+        # Only split if response is substantial and has clear separators
         replies = [assistant_reply]
-        if '\n\n' in assistant_reply or '**' in assistant_reply:
-            # Split by double newlines or markdown headers
+        if len(assistant_reply) > 200 and ('\n\n' in assistant_reply or '**' in assistant_reply or '##' in assistant_reply):
+            # Split by double newlines, but keep related content together
             parts = assistant_reply.split('\n\n')
             if len(parts) > 1:
-                replies = [part.strip() for part in parts if part.strip()]
+                # Filter out very short parts and combine small ones
+                filtered_parts = [part.strip() for part in parts if part.strip() and len(part.strip()) > 20]
+                if len(filtered_parts) > 1:
+                    replies = filtered_parts
+                    print(f"Split response into {len(replies)} parts")
+                else:
+                    replies = [assistant_reply]  # Keep as single message if splitting doesn't make sense
         
         # Create memory of this interaction
         memory_text = f"User asked: {user_message}. Assistant replied: {assistant_reply[:200]}"
@@ -425,8 +609,11 @@ Provide a helpful response. If appropriate, break your response into multiple pa
 def proactive():
     """Generate proactive message based on recent memories"""
     try:
+        # Get authenticated user or use default
+        user = get_user_from_token(request)
+        user_id = user.id if user else request.args.get('userId', 'default')
+        
         mode = request.args.get('mode', 'student')
-        user_id = request.args.get('userId', 'default')
         profile_id = f"{user_id}-{mode}" if user_id != 'default' else DEFAULT_PROFILE_ID
         
         # Get recent memories
@@ -487,8 +674,11 @@ Keep it to one sentence, friendly and helpful."""
 def get_memories_endpoint():
     """Get memories for a user and mode"""
     try:
+        # Get authenticated user or use default
+        user = get_user_from_token(request)
+        user_id = user.id if user else request.args.get('userId', 'default')
+        
         mode = request.args.get('mode', 'student')
-        user_id = request.args.get('userId', 'default')
         profile_id = f"{user_id}-{mode}" if user_id != 'default' else DEFAULT_PROFILE_ID
         
         memories_data = get_memories(profile_id, mode=mode)
