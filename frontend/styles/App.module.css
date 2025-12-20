@@ -48,49 +48,9 @@
   z-index: 10;
 }
 
-.appNav button {
-  padding: 0.875rem 1.75rem !important;
-  margin: 0 !important;
-  border: 2px solid transparent !important;
-  background: transparent !important;
-  cursor: pointer;
-  font-size: 0.95rem !important;
-  font-weight: 600 !important;
-  border-radius: 12px !important;
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-  color: var(--text-secondary) !important;
-  position: relative;
-  display: flex !important;
-  align-items: center;
-  gap: 0.625rem !important;
-  white-space: nowrap;
-}
-
-.appNav button:hover {
-  background: #f8f9fa !important;
-  color: var(--primary-color) !important;
-  transform: translateY(-1px);
-  border-color: var(--border-color) !important;
-}
-
 .appNav button.active {
-  background: var(--primary-gradient) !important;
+  background: #667eea !important;
   color: white !important;
-  box-shadow: var(--shadow-md) !important;
-  transform: translateY(-1px);
-  border-color: transparent !important;
-}
-
-.appNav button.active::before {
-  content: '';
-  position: absolute;
-  bottom: -1px;
-  left: 50%;
-  transform: translateX(-50%);
-  width: 40%;
-  height: 3px;
-  background: white;
-  border-radius: 2px 2px 0 0;
 }
 
 .appMain {

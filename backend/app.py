@@ -3,10 +3,16 @@ from flask_cors import CORS
 import os
 from dotenv import load_dotenv
 import google.genai as genai
-from datetime import datetime
+from datetime import datetime, timezone
 import requests
 import json
-from models import db, User
+import uuid
+from typing import List, Dict
+from models import db, User, Conversation, Message, Task, UserProfile
+from services.memory_orchestrator import build_context_for_turn
+from services.llm import call_gemini
+from services.memory_classifier import classify_memory
+from services.supermemory_client import upsert_profile_memory, get_profile_memory, create_memory
 from auth import (
     hash_password, verify_password, generate_token, 
     verify_token, get_user_from_token, generate_user_id, init_bcrypt
@@ -22,7 +28,11 @@ app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'your-secret-key-change-in-pr
 # Initialize extensions
 db.init_app(app)
 init_bcrypt(app)
-CORS(app, supports_credentials=True)
+CORS(app, 
+     supports_credentials=True,
+     origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+     allow_headers=["Content-Type", "Authorization"],
+     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 
 # Create tables
 with app.app_context():
@@ -131,63 +141,8 @@ def search_memories(profile_id, query, mode=None, limit=5):
     # Return empty results instead of failing - chat will work without memory search
     return {'results': []}
 
-def create_memory(profile_id, text, metadata=None):
-    """Create a new memory using Supermemory API"""
-    # Build container tags
-    container_tags = [profile_id] if profile_id else []
-    if metadata and metadata.get('mode'):
-        container_tags.append(f"{profile_id}-{metadata.get('mode')}")
-    
-    try:
-        # Supermemory API v3 uses /documents endpoint for creating memories
-        # Try format with 'content' field first
-        url = f'{SUPERMEMORY_API_URL}/documents'
-        payload = {
-            'content': text,
-            'containerTags': container_tags,
-        }
-        if metadata:
-            payload['metadata'] = metadata
-        
-        response = requests.post(
-            url,
-            headers=get_supermemory_headers(),
-            json=payload
-        )
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.HTTPError as e:
-        # Try alternative endpoint format if first fails
-        if e.response.status_code == 400:
-            try:
-                # Alternative format: try with 'text' instead of 'content'
-                url = f'{SUPERMEMORY_API_URL}/documents'
-                payload = {
-                    'text': text,
-                    'containerTags': container_tags,
-                }
-                if metadata:
-                    payload['metadata'] = metadata
-                
-                response = requests.post(
-                    url,
-                    headers=get_supermemory_headers(),
-                    json=payload
-                )
-                response.raise_for_status()
-                return response.json()
-            except Exception as e2:
-                error_detail = e2.response.text if hasattr(e2, 'response') and hasattr(e2.response, 'text') else str(e2)
-                print(f"Error creating memory (alternative format): {e2}")
-                print(f"Response: {error_detail}")
-        else:
-            error_detail = e.response.text if hasattr(e, 'response') and hasattr(e.response, 'text') else str(e)
-            print(f"Error creating memory: {e}")
-            print(f"Response: {error_detail}")
-    except Exception as e:
-        print(f"Error creating memory: {e}")
-    # Don't fail the entire request if memory creation fails
-    return None
+# create_memory function is now imported from services.supermemory_client
+# The old local function has been removed to avoid conflicts
 
 def get_memories(profile_id, mode=None, limit=50):
     """Get memories for a profile"""
@@ -331,6 +286,59 @@ def web_search(query, provider='parallel'):
         return web_search_parallel(query)
     return []
 
+def write_back_memories(user_id: str, role: str, user_message: str, llm_response: str, context_bundle: Dict) -> List[str]:
+    """Write back memories from conversation with classification"""
+    memory_ids = []
+    
+    # Create session summary memory
+    summary_text = f"User asked: {user_message[:150]}. Assistant provided guidance on this topic."
+    classification = classify_memory(role, summary_text)
+    
+    metadata = {
+        'mode': role,
+        'source': 'chat',
+        'createdAt': datetime.now(timezone.utc).isoformat(),
+        'userId': user_id,
+        'durability': classification.get('durability', 'medium'),
+        'expires_at': classification.get('expires_at')
+    }
+    
+    print(f"[Write Back] Creating summary memory: {summary_text[:80]}...")
+    result = create_memory(user_id, summary_text, metadata, role=role)
+    if result and result.get('id'):
+        memory_ids.append(result['id'])
+        print(f"[Write Back] ✅ Summary memory created: {result.get('id')}")
+    else:
+        print(f"[Write Back] ❌ Summary memory creation failed (result: {result})")
+    
+    # Extract important facts from response (simple heuristic)
+    keywords = ['applied', 'deadline', 'exam', 'event', 'meeting']
+    has_keywords = any(keyword in llm_response.lower() for keyword in keywords)
+    print(f"[Write Back] Checking for important facts. Keywords found: {has_keywords}")
+    
+    if has_keywords:
+        fact_text = f"Important: {llm_response[:200]}"
+        fact_classification = classify_memory(role, fact_text)
+        fact_metadata = {
+            'mode': role,
+            'source': 'chat',
+            'type': 'fact',
+            'createdAt': datetime.now(timezone.utc).isoformat(),
+            'userId': user_id,
+            'durability': fact_classification.get('durability', 'medium'),
+            'expires_at': fact_classification.get('expires_at')
+        }
+        
+        print(f"[Write Back] Creating fact memory: {fact_text[:80]}...")
+        fact_result = create_memory(user_id, fact_text, fact_metadata, role=role)
+        if fact_result and fact_result.get('id'):
+            memory_ids.append(fact_result['id'])
+            print(f"[Write Back] ✅ Fact memory created: {fact_result.get('id')}")
+        else:
+            print(f"[Write Back] ❌ Fact memory creation failed (result: {fact_result})")
+    
+    return memory_ids
+
 @app.route('/api/health', methods=['GET'])
 def health():
     """Health check endpoint"""
@@ -436,7 +444,7 @@ def get_current_user():
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
-    """Main chat endpoint"""
+    """Main chat endpoint with orchestrator-based context engineering"""
     try:
         # Get authenticated user or use default
         user = get_user_from_token(request)
@@ -453,23 +461,12 @@ def chat():
         # Join multiple rapid messages into one
         user_message = ' '.join(messages) if isinstance(messages, list) else messages
         
-        # Get profile ID (can be based on userId and mode)
-        profile_id = f"{user_id}-{mode}" if user_id != 'default' else DEFAULT_PROFILE_ID
-        
-        # Search memories
-        memory_results = search_memories(profile_id, user_message, mode=mode)
-        memory_context = ''
-        if memory_results.get('results'):
-            memory_context = '\n'.join([
-                f"- {mem.get('text', '')}" 
-                for mem in memory_results['results'][:5]
-            ])
+        # Build context bundle using orchestrator
+        context_bundle = build_context_for_turn(user_id, mode, user_message)
         
         # Web search if requested
         web_results = []
         web_context = ''
-        tools_used = []
-        
         if use_search or any(keyword in user_message.lower() for keyword in ['search', 'latest', 'news', 'find']):
             web_results = web_search(user_message)
             if web_results:
@@ -477,110 +474,113 @@ def chat():
                     f"- {result.get('title', '')}: {result.get('snippet', result.get('text', ''))}"
                     for result in web_results[:3]
                 ])
-                tools_used.append({'name': 'web.search', 'status': 'success'})
+                context_bundle['web_search'] = web_context
         
-        # Build context for LLM
-        system_prompt = f"""You are a helpful personal assistant in {mode} mode. 
-You have access to the user's memories and can search the web when needed.
-
-Mode-specific context:
-- Student mode: Help with homework, study planning, deadlines, academic advice
-- Parent mode: Help with family planning, kids' activities, scheduling, family organization
-- Job mode: Help with job applications, interview prep, career advice, networking
-
-Use the user's memories to provide personalized responses. Be proactive and helpful."""
-
-        user_prompt = f"""User message: {user_message}
-
-{f'Relevant memories:\n{memory_context}' if memory_context else ''}
-{f'\nWeb search results:\n{web_context}' if web_context else ''}
-
-Provide a helpful response. If appropriate, break your response into multiple parts for clarity."""
-
-        # Call Gemini
-        if not client or not model_name:
-            raise ValueError("Gemini client not initialized. Please set GEMINI_API_KEY in your .env file.")
-        
+        # Call Gemini with context bundle
         try:
-            # Combine system and user prompts for Gemini
-            full_prompt = f"{system_prompt}\n\n{user_prompt}"
-            
-            # Use the new google.genai API
-            from google.genai import types
-            response = client.models.generate_content(
-                model=model_name,
-                contents=full_prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.7,
-                    max_output_tokens=2048,  # Increased from 1000 to allow longer responses
-                )
+            llm_response, tool_traces = call_gemini(
+                user_id=user_id,
+                role=mode,
+                message=user_message,
+                context_bundle=context_bundle
             )
-            # Extract text from response - check for truncation
-            if hasattr(response, 'text'):
-                assistant_reply = response.text
-            elif hasattr(response, 'candidates') and response.candidates:
-                # Fallback: extract from candidates
-                candidate = response.candidates[0]
-                if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
-                    assistant_reply = ''.join([part.text for part in candidate.content.parts if hasattr(part, 'text')])
-                else:
-                    assistant_reply = str(candidate)
-            else:
-                assistant_reply = str(response)
             
-            # Check if response was truncated and log for debugging
-            if hasattr(response, 'candidates') and response.candidates:
-                finish_reason = getattr(response.candidates[0], 'finish_reason', None)
-                if finish_reason:
-                    print(f"Finish reason: {finish_reason}")
-                    if 'MAX_TOKENS' in str(finish_reason):
-                        assistant_reply += "\n\n[Note: Response may be truncated due to token limit. Ask me to continue if needed.]"
-            
-            # Log response length for debugging
-            print(f"Response length: {len(assistant_reply)} characters")
+            if web_results:
+                tool_traces.append({'name': 'web.search', 'status': 'success'})
         except Exception as gemini_error:
-            # Handle Gemini API errors gracefully
             error_str = str(gemini_error)
-            if 'quota' in error_str.lower() or 'quota_exceeded' in error_str.lower() or '429' in error_str:
-                assistant_reply = f"I'm sorry, but I've reached my API quota limit. Please check your Google Cloud billing or try again later. In the meantime, here's a basic response:\n\nBased on your message '{user_message}', I'd be happy to help once the API quota is restored."
-            elif 'rate_limit' in error_str.lower() or '429' in error_str:
-                assistant_reply = f"I'm experiencing rate limits. Please wait a moment and try again. Your message was: '{user_message}'"
+            if 'quota' in error_str.lower() or '429' in error_str:
+                llm_response = f"I'm sorry, but I've reached my API quota limit. Please check your Google Cloud billing or try again later."
+                tool_traces = [{'name': 'gemini', 'status': 'error', 'error': 'quota_exceeded'}]
+            elif 'rate_limit' in error_str.lower():
+                llm_response = f"I'm experiencing rate limits. Please wait a moment and try again."
+                tool_traces = [{'name': 'gemini', 'status': 'error', 'error': 'rate_limit'}]
             else:
-                # For other errors, provide a helpful fallback
-                assistant_reply = f"I encountered an issue connecting to the AI service. Your message was: '{user_message}'. Please check your API configuration or try again later."
-            print(f"Gemini API error (using fallback): {gemini_error}")
+                llm_response = f"I encountered an issue connecting to the AI service. Please check your API configuration or try again later."
+                tool_traces = [{'name': 'gemini', 'status': 'error', 'error': str(gemini_error)}]
+            print(f"Gemini API error: {gemini_error}")
         
         # Split response into multiple messages if it contains clear sections
-        # Only split if response is substantial and has clear separators
-        replies = [assistant_reply]
-        if len(assistant_reply) > 200 and ('\n\n' in assistant_reply or '**' in assistant_reply or '##' in assistant_reply):
-            # Split by double newlines, but keep related content together
-            parts = assistant_reply.split('\n\n')
+        replies = [llm_response]
+        if len(llm_response) > 200 and ('\n\n' in llm_response or '**' in llm_response or '##' in llm_response):
+            parts = llm_response.split('\n\n')
             if len(parts) > 1:
-                # Filter out very short parts and combine small ones
                 filtered_parts = [part.strip() for part in parts if part.strip() and len(part.strip()) > 20]
                 if len(filtered_parts) > 1:
                     replies = filtered_parts
-                    print(f"Split response into {len(replies)} parts")
+        
+        # Write back memories with classification
+        print(f"[Chat] Writing back memories for user_id={user_id}, mode={mode}")
+        memory_ids = write_back_memories(user_id, mode, user_message, llm_response, context_bundle)
+        print(f"[Chat] Memory creation result: {len(memory_ids)} memories created (IDs: {memory_ids})")
+        
+        # Save conversation history to database
+        conversation_id = None
+        if user_id != 'default':
+            try:
+                # Get or create conversation for this user and mode
+                conversation = Conversation.query.filter_by(
+                    user_id=user_id,
+                    mode=mode
+                ).order_by(Conversation.updated_at.desc()).first()
+                
+                # Create new conversation if none exists or if last one is older than 24 hours
+                if not conversation:
+                    should_create_new = True
                 else:
-                    replies = [assistant_reply]  # Keep as single message if splitting doesn't make sense
-        
-        # Create memory of this interaction
-        memory_text = f"User asked: {user_message}. Assistant replied: {assistant_reply[:200]}"
-        memory_metadata = {
-            'mode': mode,
-            'source': 'chat',
-            'createdAt': datetime.now().isoformat(),
-            'userId': user_id
-        }
-        create_memory(profile_id, memory_text, memory_metadata)
-        
-        tools_used.append({'name': 'memory.search', 'status': 'success'})
-        tools_used.append({'name': 'memory.write', 'status': 'success'})
+                    # Compare datetimes - handle timezone-aware comparison
+                    now = datetime.now(timezone.utc)
+                    updated = conversation.updated_at
+                    if updated.tzinfo is None:
+                        # Make naive datetime timezone-aware
+                        updated = updated.replace(tzinfo=timezone.utc)
+                    time_diff = (now - updated).total_seconds()
+                    should_create_new = time_diff > 86400
+                
+                if should_create_new:
+                    conversation = Conversation(
+                        id=str(uuid.uuid4()),
+                        user_id=user_id,
+                        mode=mode,
+                        title=user_message[:50] + '...' if len(user_message) > 50 else user_message
+                    )
+                    db.session.add(conversation)
+                    db.session.flush()
+                
+                conversation_id = conversation.id
+                conversation.updated_at = datetime.now(timezone.utc)
+                
+                # Save user message
+                user_msg = Message(
+                    id=str(uuid.uuid4()),
+                    conversation_id=conversation_id,
+                    role='user',
+                    content=user_message
+                )
+                db.session.add(user_msg)
+                
+                # Save assistant replies
+                for reply in replies:
+                    assistant_msg = Message(
+                        id=str(uuid.uuid4()),
+                        conversation_id=conversation_id,
+                        role='assistant',
+                        content=reply,
+                        tools_used=json.dumps(tool_traces) if tool_traces else None
+                    )
+                    db.session.add(assistant_msg)
+                
+                db.session.commit()
+            except Exception as db_error:
+                print(f"Error saving conversation history: {db_error}")
+                db.session.rollback()
+                # Continue even if DB save fails
         
         return jsonify({
             'replies': replies,
-            'toolsUsed': tools_used
+            'toolsUsed': tool_traces,
+            'conversationId': conversation_id,
+            'savedMemoryIds': memory_ids
         })
         
     except Exception as e:
@@ -604,6 +604,57 @@ Provide a helpful response. If appropriate, break your response into multiple pa
             'error': error_message,
             'details': 'Make sure GEMINI_API_KEY is set correctly in your .env file and you have sufficient quota.'
         }), 500
+
+# Profile Endpoints
+@app.route('/api/profile', methods=['GET'])
+def get_profile():
+    """Get user profile from Supermemory"""
+    try:
+        user = get_user_from_token(request)
+        if not user:
+            return jsonify({'error': 'Unauthorized'}), 401
+        
+        profile_data = get_profile_memory(user.id)
+        if profile_data:
+            return jsonify({'profile': profile_data})
+        else:
+            return jsonify({'profile': None})
+    except Exception as e:
+        print(f"Error getting profile: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/profile', methods=['POST'])
+def update_profile():
+    """Create or update user profile in Supermemory"""
+    try:
+        user = get_user_from_token(request)
+        if not user:
+            return jsonify({'error': 'Unauthorized'}), 401
+        
+        data = request.json
+        profile_data = data.get('profile', {})
+        
+        # Ensure user_id matches authenticated user
+        profile_data['user_id'] = user.id
+        profile_data['name'] = profile_data.get('name', user.name)
+        
+        # Validate and create UserProfile object
+        try:
+            profile = UserProfile.from_dict(profile_data)
+        except Exception as e:
+            return jsonify({'error': f'Invalid profile data: {str(e)}'}), 400
+        
+        # Store in Supermemory
+        result = upsert_profile_memory(user.id, profile.to_dict())
+        
+        if result:
+            return jsonify({'profile': profile.to_dict(), 'success': True})
+        else:
+            return jsonify({'error': 'Failed to save profile'}), 500
+            
+    except Exception as e:
+        print(f"Error updating profile: {e}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/proactive', methods=['GET'])
 def proactive():
@@ -679,13 +730,35 @@ def get_memories_endpoint():
         user_id = user.id if user else request.args.get('userId', 'default')
         
         mode = request.args.get('mode', 'student')
-        profile_id = f"{user_id}-{mode}" if user_id != 'default' else DEFAULT_PROFILE_ID
         
-        memories_data = get_memories(profile_id, mode=mode)
-        return jsonify(memories_data)
+        print(f"[Get Memories] Fetching memories for user_id={user_id}, mode={mode}")
+        
+        # Use the supermemory_client function directly with correct user_id and role
+        from services.supermemory_client import get_recent_memories
+        
+        # Get recent memories (this function already handles container tags correctly)
+        memories = get_recent_memories(user_id, role=mode, limit=50)
+        
+        # Format memories for frontend
+        formatted_memories = []
+        for mem in memories:
+            # Handle different response formats from Supermemory API
+            text = mem.get('text') or mem.get('content', '')
+            metadata = mem.get('metadata', {})
+            
+            formatted_memories.append({
+                'id': mem.get('id', ''),
+                'text': text,
+                'metadata': metadata
+            })
+        
+        print(f"[Get Memories] Found {len(formatted_memories)} memories")
+        return jsonify({'memories': formatted_memories})
         
     except Exception as e:
-        print(f"Error getting memories: {e}")
+        print(f"[Get Memories] ❌ Error getting memories: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'memories': []}), 500
 
 @app.route('/api/memories/<memory_id>', methods=['DELETE'])
@@ -718,6 +791,334 @@ def update_memory_endpoint(memory_id):
         print(f"Error updating memory: {e}")
         return jsonify({'error': str(e)}), 500
 
+# Conversation History Endpoints
+@app.route('/api/conversations', methods=['GET'])
+def get_conversations():
+    """Get all conversations for a user, optionally filtered by mode"""
+    try:
+        user = get_user_from_token(request)
+        if not user:
+            return jsonify({'error': 'Unauthorized'}), 401
+        
+        mode = request.args.get('mode')
+        limit = int(request.args.get('limit', 50))
+        
+        query = Conversation.query.filter_by(user_id=user.id)
+        if mode:
+            query = query.filter_by(mode=mode)
+        
+        conversations = query.order_by(Conversation.updated_at.desc()).limit(limit).all()
+        
+        return jsonify({
+            'conversations': [conv.to_dict() for conv in conversations]
+        })
+    except Exception as e:
+        print(f"Error getting conversations: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/conversations/<conversation_id>', methods=['GET'])
+def get_conversation(conversation_id):
+    """Get a specific conversation with all messages"""
+    try:
+        user = get_user_from_token(request)
+        if not user:
+            return jsonify({'error': 'Unauthorized'}), 401
+        
+        conversation = Conversation.query.filter_by(
+            id=conversation_id,
+            user_id=user.id
+        ).first()
+        
+        if not conversation:
+            return jsonify({'error': 'Conversation not found'}), 404
+        
+        result = conversation.to_dict()
+        result['messages'] = [msg.to_dict() for msg in conversation.messages]
+        
+        return jsonify(result)
+    except Exception as e:
+        print(f"Error getting conversation: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/conversations/<conversation_id>', methods=['DELETE'])
+def delete_conversation(conversation_id):
+    """Delete a conversation"""
+    try:
+        user = get_user_from_token(request)
+        if not user:
+            return jsonify({'error': 'Unauthorized'}), 401
+        
+        conversation = Conversation.query.filter_by(
+            id=conversation_id,
+            user_id=user.id
+        ).first()
+        
+        if not conversation:
+            return jsonify({'error': 'Conversation not found'}), 404
+        
+        db.session.delete(conversation)
+        db.session.commit()
+        
+        return jsonify({'success': True})
+    except Exception as e:
+        print(f"Error deleting conversation: {e}")
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+# Task Management Endpoints
+@app.route('/api/tasks', methods=['GET'])
+def get_tasks():
+    """Get tasks for a user, optionally filtered by mode and status"""
+    try:
+        user = get_user_from_token(request)
+        if not user:
+            return jsonify({'error': 'Unauthorized'}), 401
+        
+        mode = request.args.get('mode')
+        status = request.args.get('status')
+        
+        query = Task.query.filter_by(user_id=user.id)
+        if mode:
+            query = query.filter_by(mode=mode)
+        if status:
+            query = query.filter_by(status=status)
+        
+        tasks = query.order_by(Task.created_at.desc()).all()
+        
+        return jsonify({
+            'tasks': [task.to_dict() for task in tasks]
+        })
+    except Exception as e:
+        print(f"Error getting tasks: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/tasks', methods=['POST'])
+def create_task():
+    """Create a new task"""
+    try:
+        user = get_user_from_token(request)
+        if not user:
+            return jsonify({'error': 'Unauthorized'}), 401
+        
+        data = request.json
+        task = Task(
+            id=str(uuid.uuid4()),
+            user_id=user.id,
+            mode=data.get('mode', 'student'),
+            title=data.get('title', ''),
+            description=data.get('description'),
+            status=data.get('status', 'pending'),
+            priority=data.get('priority', 'medium'),
+            due_date=datetime.fromisoformat(data['dueDate']) if data.get('dueDate') else None
+        )
+        
+        db.session.add(task)
+        db.session.commit()
+        
+        return jsonify(task.to_dict()), 201
+    except Exception as e:
+        print(f"Error creating task: {e}")
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/tasks/<task_id>', methods=['PUT'])
+def update_task(task_id):
+    """Update a task"""
+    try:
+        user = get_user_from_token(request)
+        if not user:
+            return jsonify({'error': 'Unauthorized'}), 401
+        
+        task = Task.query.filter_by(
+            id=task_id,
+            user_id=user.id
+        ).first()
+        
+        if not task:
+            return jsonify({'error': 'Task not found'}), 404
+        
+        data = request.json
+        if 'title' in data:
+            task.title = data['title']
+        if 'description' in data:
+            task.description = data['description']
+        if 'status' in data:
+            task.status = data['status']
+            if data['status'] == 'completed' and not task.completed_at:
+                task.completed_at = datetime.now(timezone.utc)
+            elif data['status'] != 'completed':
+                task.completed_at = None
+        if 'priority' in data:
+            task.priority = data['priority']
+        if 'dueDate' in data:
+            task.due_date = datetime.fromisoformat(data['dueDate']) if data['dueDate'] else None
+        if 'mode' in data:
+            task.mode = data['mode']
+        
+        task.updated_at = datetime.now(timezone.utc)
+        db.session.commit()
+        
+        return jsonify(task.to_dict())
+    except Exception as e:
+        print(f"Error updating task: {e}")
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/tasks/<task_id>', methods=['DELETE'])
+def delete_task(task_id):
+    """Delete a task"""
+    try:
+        user = get_user_from_token(request)
+        if not user:
+            return jsonify({'error': 'Unauthorized'}), 401
+        
+        task = Task.query.filter_by(
+            id=task_id,
+            user_id=user.id
+        ).first()
+        
+        if not task:
+            return jsonify({'error': 'Task not found'}), 404
+        
+        db.session.delete(task)
+        db.session.commit()
+        
+        return jsonify({'success': True})
+    except Exception as e:
+        print(f"Error deleting task: {e}")
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+# Memory Graph Endpoint
+@app.route('/api/memory-graph', methods=['GET'])
+def get_memory_graph():
+    """Generate memory graph data with nodes and edges"""
+    try:
+        user = get_user_from_token(request)
+        if not user:
+            return jsonify({'error': 'Unauthorized'}), 401
+        
+        role = request.args.get('role')  # Optional filter by role
+        user_id = user.id
+        
+        # Get all memories for the user (optionally filtered by role)
+        from services.supermemory_client import get_recent_memories
+        memories = get_recent_memories(user_id, role=role, limit=100)
+        
+        nodes = []
+        edges = []
+        node_ids = set()
+        
+        # User node
+        user_node_id = f"user:{user_id}"
+        nodes.append({
+            "id": user_node_id,
+            "label": user.name or "User",
+            "type": "user",
+            "role": "all"
+        })
+        node_ids.add(user_node_id)
+        
+        # Process memories to extract entities
+        for mem in memories:
+            text = mem.get('text', '')
+            metadata = mem.get('metadata', {})
+            mem_role = metadata.get('mode', role or 'all')
+            mem_id = mem.get('id', '')
+            
+            # Extract entities (simple pattern matching)
+            entities = extract_entities(text, mem_role)
+            
+            for entity in entities:
+                entity_id = entity['id']
+                
+                # Add entity node if not exists
+                if entity_id not in node_ids:
+                    nodes.append({
+                        "id": entity_id,
+                        "label": entity['label'],
+                        "type": entity['type'],
+                        "role": mem_role
+                    })
+                    node_ids.add(entity_id)
+                
+                # Add edge from user to entity
+                edge_id = f"{user_node_id}-{entity_id}"
+                if edge_id not in [e.get('id') for e in edges]:
+                    edges.append({
+                        "id": edge_id,
+                        "source": user_node_id,
+                        "target": entity_id,
+                        "relation": entity['relation']
+                    })
+        
+        return jsonify({
+            "nodes": nodes,
+            "edges": edges
+        })
+    except Exception as e:
+        print(f"Error generating memory graph: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+def extract_entities(text: str, role: str) -> List[Dict]:
+    """Extract entities (courses, companies, kids, etc.) from memory text"""
+    entities = []
+    text_lower = text.lower()
+    
+    # Course/Exam entities (Student role)
+    if role == 'student' or 'course' in text_lower or 'exam' in text_lower:
+        import re
+        # Look for course patterns: "CS101", "AI 101", "course: X"
+        course_patterns = re.findall(r'\b([A-Z]{2,}\s?\d{3,})\b', text)
+        for course in course_patterns:
+            entities.append({
+                "id": f"course:{course.replace(' ', '')}",
+                "label": course,
+                "type": "course",
+                "relation": "studying"
+            })
+        
+        # Exam patterns
+        exam_patterns = re.findall(r'(midterm|final|exam|test)\s+(?:for|in)?\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)', text)
+        for exam_type, subject in exam_patterns:
+            entities.append({
+                "id": f"exam:{subject.lower().replace(' ', '-')}-{exam_type}",
+                "label": f"{exam_type.title()} - {subject}",
+                "type": "exam",
+                "relation": "preparing_for"
+            })
+    
+    # Company entities (Job role)
+    if role == 'job' or 'company' in text_lower or 'applied' in text_lower:
+        import re
+        # Look for company names (capitalized words after "at", "to", "with")
+        company_patterns = re.findall(r'(?:applied to|interview at|company|at)\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)', text)
+        for company in company_patterns:
+            if len(company) > 2:  # Filter out short matches
+                entities.append({
+                    "id": f"company:{company.lower().replace(' ', '-')}",
+                    "label": company,
+                    "type": "company",
+                    "relation": "applied_to" if "applied" in text_lower else "interested_in"
+                })
+    
+    # Kid entities (Parent role)
+    if role == 'parent' or 'kid' in text_lower or 'child' in text_lower:
+        import re
+        # Look for kid names (capitalized words after "kid", "child", "son", "daughter")
+        kid_patterns = re.findall(r'(?:kid|child|son|daughter)\s+([A-Z][a-z]+)', text)
+        for kid_name in kid_patterns:
+            entities.append({
+                "id": f"kid:{kid_name.lower()}",
+                "label": kid_name,
+                "type": "kid",
+                "relation": "parent_of"
+            })
+    
+    return entities
+
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    app.run(debug=True, port=5001)
 

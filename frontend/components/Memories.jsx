@@ -45,7 +45,7 @@ function Memories({ mode, userId }) {
 
   const handleEdit = (memory) => {
     setEditingId(memory.id)
-    setEditText(memory.text || '')
+    setEditText(memory.text || memory.content || '')
   }
 
   const handleSaveEdit = async (memoryId) => {
@@ -121,7 +121,7 @@ function Memories({ mode, userId }) {
               ) : (
                 <>
                   <div className={styles['memory-content']}>
-                    <p>{memory.text}</p>
+                    <p>{memory.text || memory.content || 'No content'}</p>
                     {memory.metadata && (
                       <div className={styles['memory-metadata']}>
                         {memory.metadata.mode && (

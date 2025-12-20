@@ -67,10 +67,22 @@ export default function Home() {
                 borderRadius: '8px',
                 color: 'white',
                 cursor: 'pointer',
-                fontSize: '0.85rem'
+                fontSize: '0.85rem',
+                fontWeight: 500,
+                transition: 'all 0.2s ease',
+                position: 'relative',
+                zIndex: 1
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = 'rgba(255, 255, 255, 0.3)'
+                e.currentTarget.style.transform = 'translateY(-1px)'
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = 'rgba(255, 255, 255, 0.2)'
+                e.currentTarget.style.transform = 'translateY(0)'
               }}
             >
-              Logout
+              🚪 Logout
             </button>
           </div>
         </div>
@@ -93,7 +105,9 @@ export default function Home() {
             fontSize: '0.95rem',
             fontWeight: 600,
             cursor: 'pointer',
-            transition: 'all 0.3s ease'
+            transition: 'all 0.3s ease',
+            background: activeTab === 'chat' ? '#667eea' : 'transparent',
+            color: activeTab === 'chat' ? 'white' : 'inherit'
           }}
         >
           💬 Chat
@@ -109,7 +123,9 @@ export default function Home() {
             fontSize: '0.95rem',
             fontWeight: 600,
             cursor: 'pointer',
-            transition: 'all 0.3s ease'
+            transition: 'all 0.3s ease',
+            background: activeTab === 'memories' ? '#667eea' : 'transparent',
+            color: activeTab === 'memories' ? 'white' : 'inherit'
           }}
         >
           🧠 Memories
@@ -125,7 +141,9 @@ export default function Home() {
             fontSize: '0.95rem',
             fontWeight: 600,
             cursor: 'pointer',
-            transition: 'all 0.3s ease'
+            transition: 'all 0.3s ease',
+            background: activeTab === 'graph' ? '#667eea' : 'transparent',
+            color: activeTab === 'graph' ? 'white' : 'inherit'
           }}
         >
           📊 Memory Graph
@@ -133,15 +151,15 @@ export default function Home() {
       </nav>
 
       <main className={styles['app-main']}>
-        {activeTab === 'chat' && (
+        <div style={{ display: activeTab === 'chat' ? 'block' : 'none' }}>
           <Chat mode={currentMode} userId={user.id} />
-        )}
-        {activeTab === 'memories' && (
+        </div>
+        <div style={{ display: activeTab === 'memories' ? 'block' : 'none' }}>
           <Memories mode={currentMode} userId={user.id} />
-        )}
-        {activeTab === 'graph' && (
+        </div>
+        <div style={{ display: activeTab === 'graph' ? 'block' : 'none' }}>
           <MemoryGraph mode={currentMode} userId={user.id} />
-        )}
+        </div>
       </main>
     </div>
   )
