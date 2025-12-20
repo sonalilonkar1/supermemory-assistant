@@ -133,11 +133,16 @@ def search_memories(user_id: str, query: str, role: Optional[str] = None, limit:
         data = response.json()
         results = data.get('results', [])
         
-        # Filter out expired memories
+        # Filter out expired memories (+ enforce strict mode if provided)
         now = datetime.now(timezone.utc)
         filtered_results = []
         for mem in results:
             metadata = mem.get('metadata', {})
+            # Strict mode separation: only return memories explicitly tagged for this role
+            if role:
+                mem_mode = (metadata or {}).get('mode')
+                if mem_mode != role:
+                    continue
             expires_at = metadata.get('expires_at')
             if expires_at:
                 try:
@@ -194,11 +199,16 @@ def get_recent_memories(user_id: str, role: Optional[str] = None, limit: int = 5
             else:
                 memories = []
             
-            # Filter expired and return as list
+            # Filter expired (+ enforce strict mode if provided) and return as list
             now = datetime.now(timezone.utc)
             filtered = []
             for mem in memories:
                 metadata = mem.get('metadata', {})
+                # Strict mode separation: only return memories explicitly tagged for this role
+                if role:
+                    mem_mode = (metadata or {}).get('mode')
+                    if mem_mode != role:
+                        continue
                 expires_at = metadata.get('expires_at')
                 if expires_at:
                     try:
@@ -243,6 +253,11 @@ def get_recent_memories(user_id: str, role: Optional[str] = None, limit: int = 5
                 filtered = []
                 for mem in memories:
                     metadata = mem.get('metadata', {})
+                    # Strict mode separation: only return memories explicitly tagged for this role
+                    if role:
+                        mem_mode = (metadata or {}).get('mode')
+                        if mem_mode != role:
+                            continue
                     expires_at = metadata.get('expires_at')
                     if expires_at:
                         try:

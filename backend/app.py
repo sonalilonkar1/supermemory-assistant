@@ -736,7 +736,7 @@ def get_memories_endpoint():
         # Use the supermemory_client function directly with correct user_id and role
         from services.supermemory_client import get_recent_memories
         
-        # Get recent memories (this function already handles container tags correctly)
+        # Get recent memories (strictly filtered by role inside get_recent_memories)
         memories = get_recent_memories(user_id, role=mode, limit=50)
         
         # Format memories for frontend
@@ -745,6 +745,10 @@ def get_memories_endpoint():
             # Handle different response formats from Supermemory API
             text = mem.get('text') or mem.get('content', '')
             metadata = mem.get('metadata', {})
+
+            # Extra safety: enforce strict mode separation at the API boundary too
+            if (metadata or {}).get('mode') != mode:
+                continue
             
             formatted_memories.append({
                 'id': mem.get('id', ''),
@@ -1019,19 +1023,44 @@ def get_memory_graph():
         })
         node_ids.add(user_node_id)
         
-        # Process memories to extract entities
+        # Process memories to extract entities + always add a memory node
+        edge_ids = set()
         for mem in memories:
-            text = mem.get('text', '')
-            metadata = mem.get('metadata', {})
+            # Normalize memory text across API shapes
+            text = mem.get('text') or mem.get('content') or mem.get('summary') or ''
+            metadata = mem.get('metadata', {}) or {}
             mem_role = metadata.get('mode', role or 'all')
-            mem_id = mem.get('id', '')
-            
+            mem_id = mem.get('id') or ''
+
+            # Always add a "memory" node per memory so the graph is never empty
+            memory_node_id = f"memory:{mem_id}" if mem_id else f"memory:local:{uuid.uuid4()}"
+            if memory_node_id not in node_ids:
+                nodes.append({
+                    "id": memory_node_id,
+                    "label": (text[:80] + "…") if len(text) > 80 else (text or "Memory"),
+                    "type": "memory",
+                    "role": mem_role,
+                    "sourceId": mem_id,
+                    "metadata": metadata
+                })
+                node_ids.add(memory_node_id)
+
+            # Edge: user -> memory
+            edge_id = f"{user_node_id}-{memory_node_id}"
+            if edge_id not in edge_ids:
+                edges.append({
+                    "id": edge_id,
+                    "source": user_node_id,
+                    "target": memory_node_id,
+                    "relation": "remembered"
+                })
+                edge_ids.add(edge_id)
+
             # Extract entities (simple pattern matching)
             entities = extract_entities(text, mem_role)
-            
             for entity in entities:
                 entity_id = entity['id']
-                
+
                 # Add entity node if not exists
                 if entity_id not in node_ids:
                     nodes.append({
@@ -1041,16 +1070,17 @@ def get_memory_graph():
                         "role": mem_role
                     })
                     node_ids.add(entity_id)
-                
-                # Add edge from user to entity
-                edge_id = f"{user_node_id}-{entity_id}"
-                if edge_id not in [e.get('id') for e in edges]:
+
+                # Edge: memory -> entity (stronger semantics than user -> entity)
+                me_edge_id = f"{memory_node_id}-{entity_id}"
+                if me_edge_id not in edge_ids:
                     edges.append({
-                        "id": edge_id,
-                        "source": user_node_id,
+                        "id": me_edge_id,
+                        "source": memory_node_id,
                         "target": entity_id,
                         "relation": entity['relation']
                     })
+                    edge_ids.add(me_edge_id)
         
         return jsonify({
             "nodes": nodes,
@@ -1067,8 +1097,8 @@ def extract_entities(text: str, role: str) -> List[Dict]:
     entities = []
     text_lower = text.lower()
     
-    # Course/Exam entities (Student role)
-    if role == 'student' or 'course' in text_lower or 'exam' in text_lower:
+    # Course/Exam/Topic entities (Student role)
+    if role == 'student' or 'course' in text_lower or 'exam' in text_lower or 'test' in text_lower:
         import re
         # Look for course patterns: "CS101", "AI 101", "course: X"
         course_patterns = re.findall(r'\b([A-Z]{2,}\s?\d{3,})\b', text)
@@ -1080,15 +1110,47 @@ def extract_entities(text: str, role: str) -> List[Dict]:
                 "relation": "studying"
             })
         
-        # Exam patterns
-        exam_patterns = re.findall(r'(midterm|final|exam|test)\s+(?:for|in)?\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)', text)
-        for exam_type, subject in exam_patterns:
-            entities.append({
-                "id": f"exam:{subject.lower().replace(' ', '-')}-{exam_type}",
-                "label": f"{exam_type.title()} - {subject}",
-                "type": "exam",
-                "relation": "preparing_for"
-            })
+        # Exam patterns (handle lowercase subjects too, like "machine learning")
+        exam_patterns = re.findall(r'\b(midterm|final|exam|test)\b[^a-zA-Z0-9]{0,10}(?:for|in)?\s*([A-Za-z][A-Za-z ]{2,40})', text)
+        for exam_type, subject_raw in exam_patterns:
+            subject = subject_raw.strip().rstrip('.').rstrip(',')
+            # Avoid swallowing long trailing sentences
+            subject = subject.split('  ')[0].strip()
+            if subject:
+                entities.append({
+                    "id": f"exam:{subject.lower().replace(' ', '-')}-{exam_type}",
+                    "label": f"{exam_type.title()} - {subject.title()}",
+                    "type": "exam",
+                    "relation": "preparing_for"
+                })
+
+        # Topic patterns (common ML topics)
+        topic_keywords = [
+            "machine learning",
+            "applied machine learning",
+            "neural networks",
+            "deep learning",
+            "linear regression",
+            "logistic regression",
+            "random forest",
+            "decision trees",
+            "svm",
+            "k-means",
+            "pca",
+            "gradient descent",
+            "backpropagation",
+            "cnn",
+            "rnn",
+            "transformers",
+        ]
+        for kw in topic_keywords:
+            if kw in text_lower:
+                entities.append({
+                    "id": f"topic:{kw.replace(' ', '-')}",
+                    "label": kw.title(),
+                    "type": "topic",
+                    "relation": "studying"
+                })
     
     # Company entities (Job role)
     if role == 'job' or 'company' in text_lower or 'applied' in text_lower:

@@ -20,7 +20,10 @@ function Memories({ mode, userId }) {
       const response = await api.get('/memories', {
         params: { mode, userId }
       })
-      setMemories(response.data.memories || [])
+      // Backend should enforce strict mode, but keep a frontend guard as well
+      const fetched = response.data.memories || []
+      const strict = fetched.filter(m => (m.metadata?.mode || null) === mode)
+      setMemories(strict)
     } catch (error) {
       console.error('Error loading memories:', error)
       setMemories([])

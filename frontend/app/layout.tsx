@@ -1,5 +1,7 @@
 import type { Metadata } from 'next'
 import '../styles/globals.css'
+// Required for @supermemory/memory-graph (it relies on its generated CSS classes for layout)
+import '@supermemory/memory-graph/styles.css'
 
 export const metadata: Metadata = {
   title: 'Supermemory Assistant',

@@ -18,7 +18,15 @@ function Chat({ mode, userId }) {
   useEffect(() => {
     // Load proactive message on mount
     loadProactiveMessage()
+    // Load per-mode chat history from localStorage (strict mode separation in UI)
+    loadLocalChatHistory()
   }, [mode, userId])
+
+  useEffect(() => {
+    // Persist per-mode chat history so switching modes doesn't mix messages
+    saveLocalChatHistory()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, mode, userId])
 
   useEffect(() => {
     scrollToBottom()
@@ -26,6 +34,45 @@ function Chat({ mode, userId }) {
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }
+
+  const storageKey = () => `sm-chat:${userId || 'default'}:${mode}`
+
+  const serializeMessages = (msgs) => {
+    return (msgs || []).map(m => ({
+      ...m,
+      timestamp: m.timestamp instanceof Date ? m.timestamp.toISOString() : m.timestamp
+    }))
+  }
+
+  const deserializeMessages = (msgs) => {
+    return (msgs || []).map(m => ({
+      ...m,
+      timestamp: m.timestamp ? new Date(m.timestamp) : new Date()
+    }))
+  }
+
+  const loadLocalChatHistory = () => {
+    try {
+      const raw = localStorage.getItem(storageKey())
+      if (!raw) {
+        setMessages([])
+        return
+      }
+      const parsed = JSON.parse(raw)
+      setMessages(deserializeMessages(parsed))
+    } catch (e) {
+      console.error('Error loading local chat history:', e)
+      setMessages([])
+    }
+  }
+
+  const saveLocalChatHistory = () => {
+    try {
+      localStorage.setItem(storageKey(), JSON.stringify(serializeMessages(messages)))
+    } catch (e) {
+      // Ignore quota errors
+    }
   }
 
   const loadProactiveMessage = async () => {

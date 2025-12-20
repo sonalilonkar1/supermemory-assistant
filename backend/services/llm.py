@@ -29,6 +29,9 @@ def build_prompt(role: str, message: str, ctx: Dict[str, Any]) -> str:
 Static user profile (high level):
 {format_static_profile(ctx.get("static_profile", {}))}
 
+Cross-role context (use ONLY if relevant; do not merge personas; do not mention this section unless asked):
+{format_cross_role_context(ctx)}
+
 Recent relevant events / messages:
 {format_memories(ctx.get("recent_memories", []))}
 
@@ -43,6 +46,20 @@ If you need more information, ask concise clarifying questions.
 Be proactive and helpful. Break long responses into clear sections if needed.
 """
     return prompt
+
+def format_cross_role_context(ctx: Dict[str, Any]) -> str:
+    """Format cross-role static slice + a few cross-role memories for prompt."""
+    static = ctx.get("cross_role_static") or {}
+    memories = ctx.get("cross_role_memories") or []
+    if not static and not memories:
+        return "None"
+
+    parts: List[str] = []
+    if static:
+        parts.append(f"Cross-role profile slice:\n{static}")
+    if memories:
+        parts.append(f"Cross-role memories:\n{format_memories(memories)}")
+    return "\n\n".join(parts)
 
 def format_static_profile(profile: Dict[str, Any]) -> str:
     """Format static profile for prompt"""
@@ -114,7 +131,8 @@ def call_gemini(user_id: str, role: str, message: str, context_bundle: Dict[str,
         tool_traces = [
             {"name": "memory.search", "status": "success", "items_found": len(context_bundle.get("long_term_memories", []))},
             {"name": "memory.recent", "status": "success", "items_found": len(context_bundle.get("recent_memories", []))},
-            {"name": "profile.slice", "status": "success" if context_bundle.get("static_profile") else "empty"}
+            {"name": "profile.slice", "status": "success" if context_bundle.get("static_profile") else "empty"},
+            {"name": "memory.cross_role", "status": "success" if context_bundle.get("cross_role_static") or context_bundle.get("cross_role_memories") else "empty"}
         ]
         
         return reply_text, tool_traces

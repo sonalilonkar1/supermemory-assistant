@@ -36,3 +36,11 @@ dist/
 .DS_Store
 Thumbs.db
 
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+backend/instance/
+
+# Documentation (moved to docs/)
+docs/
