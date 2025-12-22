@@ -55,7 +55,8 @@ with app.app_context():
         "cross_mode_sources": "TEXT",
     })
 
-BUILTIN_MODES = [
+# Mode templates (suggestions). Not automatically created for a user.
+MODE_TEMPLATES = [
     {
         "id": "student",
         "key": "student",
@@ -89,6 +90,28 @@ BUILTIN_MODES = [
         "crossModeSources": ["student"],
         "isCustom": False,
     },
+    {
+        "id": "fitness",
+        "key": "fitness",
+        "name": "Fitness / Health",
+        "emoji": "💪",
+        "baseRole": "student",
+        "description": "Workouts, habits, nutrition, and health routines.",
+        "defaultTags": ["fitness", "health"],
+        "crossModeSources": [],
+        "isCustom": False,
+    },
+    {
+        "id": "fashion",
+        "key": "fashion",
+        "name": "Fashion / Style",
+        "emoji": "💅",
+        "baseRole": "student",
+        "description": "Outfit planning, wardrobe, styling ideas, and shopping lists.",
+        "defaultTags": ["fashion", "style"],
+        "crossModeSources": [],
+        "isCustom": False,
+    },
 ]
 
 def slugify_mode_key(name: str) -> str:
@@ -106,8 +129,8 @@ def resolve_mode(user_id: str, mode_key: str) -> Dict[str, any]:
     - displayName: optional
     """
     mode_key = (mode_key or "student").strip()
-    # Built-ins
-    for m in BUILTIN_MODES:
+    # Template keys (allow resolving even if user hasn't created it yet)
+    for m in MODE_TEMPLATES:
         if m["key"] == mode_key:
             return {
                 "modeKey": mode_key,
@@ -159,14 +182,13 @@ def resolve_mode(user_id: str, mode_key: str) -> Dict[str, any]:
 
 @app.route('/api/modes', methods=['GET'])
 def list_modes():
-    """List built-in + user-defined modes"""
+    """List user-defined modes (modes are user-created; templates are separate)"""
     user = get_user_from_token(request)
     if not user:
         return jsonify({'error': 'Unauthorized'}), 401
 
     custom = UserMode.query.filter_by(user_id=user.id).order_by(UserMode.created_at.asc()).all()
     modes = []
-    modes.extend(BUILTIN_MODES)
     for m in custom:
         md = m.to_dict()
         modes.append({
@@ -181,6 +203,66 @@ def list_modes():
             "isCustom": True,
         })
     return jsonify({"modes": modes})
+
+@app.route('/api/mode-templates', methods=['GET'])
+def list_mode_templates():
+    """List suggested mode templates (not created until user chooses)."""
+    return jsonify({"templates": MODE_TEMPLATES})
+
+@app.route('/api/events/upcoming', methods=['GET'])
+def upcoming_events():
+    """Upcoming events merged across all user modes."""
+    user = get_user_from_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    from services.supermemory_client import get_recent_memories
+    now = datetime.now(timezone.utc)
+
+    # Load all user-created modes
+    user_modes = UserMode.query.filter_by(user_id=user.id).order_by(UserMode.created_at.asc()).all()
+    mode_map = {m.key: {"name": m.name, "emoji": m.emoji or "✨"} for m in user_modes}
+
+    events = []
+    for mode_key, meta in mode_map.items():
+        memories = get_recent_memories(user.id, role=mode_key, limit=200)
+        for mem in memories:
+            md = mem.get('metadata', {}) or {}
+            if (md.get('mode') or mode_key) != mode_key:
+                continue
+            if md.get('type') != 'event':
+                continue
+
+            date_str = md.get('event_date') or md.get('expires_at')
+            if not date_str:
+                continue
+
+            try:
+                dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+            except Exception:
+                continue
+
+            # Keep future events only
+            if dt < now:
+                continue
+
+            text = mem.get('text') or mem.get('content') or ''
+            title = md.get('title') or (text[:80] + "…") if len(text) > 80 else text
+            events.append({
+                "id": mem.get('id'),
+                "title": title or "Event",
+                "date": dt.isoformat(),
+                "modeId": mode_key,
+                "modeName": meta["name"],
+                "modeEmoji": meta["emoji"],
+                "sourceText": text,
+            })
+
+    events.sort(key=lambda e: e["date"])
+    limit = int(request.args.get('limit', 50))
+    return jsonify({"events": events[:limit]})
 
 @app.route('/api/modes', methods=['POST'])
 def create_mode():
@@ -211,8 +293,8 @@ def create_mode():
     cross_sources = [str(s).strip() for s in cross_sources if str(s).strip()]
 
     key = (data.get('key') or slugify_mode_key(name)).strip()
-    if key in ['student', 'parent', 'job']:
-        key = f"{key}-{uuid.uuid4().hex[:4]}"
+    # Allow template keys like 'student'/'parent'/'job' because templates are not auto-created.
+    # Uniqueness is still enforced per user below.
 
     # Ensure unique per user
     exists = UserMode.query.filter_by(user_id=user.id, key=key).first()
@@ -530,6 +612,10 @@ def write_back_memories(user_id: str, role: str, user_message: str, llm_response
         'durability': classification.get('durability', 'medium'),
         'expires_at': classification.get('expires_at')
     }
+    if classification.get('type'):
+        metadata['type'] = classification.get('type')
+    if classification.get('event_date'):
+        metadata['event_date'] = classification.get('event_date')
     
     print(f"[Write Back] Creating summary memory: {summary_text[:80]}...")
     # IMPORTANT: role=mode key to keep containerTags mode-scoped
@@ -563,6 +649,10 @@ def write_back_memories(user_id: str, role: str, user_message: str, llm_response
             'durability': fact_classification.get('durability', 'medium'),
             'expires_at': fact_classification.get('expires_at')
         }
+        if fact_classification.get('type'):
+            fact_metadata['type'] = fact_classification.get('type')
+        if fact_classification.get('event_date'):
+            fact_metadata['event_date'] = fact_classification.get('event_date')
         
         print(f"[Write Back] Creating fact memory: {fact_text[:80]}...")
         fact_result = create_memory(user_id, fact_text, fact_metadata, role=role, extra_container_tags=extra_tags)
@@ -904,12 +994,14 @@ def proactive():
         user = get_user_from_token(request)
         user_id = user.id if user else request.args.get('userId', 'default')
         
-        mode = request.args.get('mode', 'student')
-        profile_id = f"{user_id}-{mode}" if user_id != 'default' else DEFAULT_PROFILE_ID
+        mode_key = request.args.get('mode', 'student')
+        mode_info = resolve_mode(user_id, mode_key)
+        mode_key = mode_info.get("modeKey", mode_key)
+        mode_label = mode_info.get("label", mode_key)
         
         # Get recent memories
-        memories_data = get_memories(profile_id, mode=mode, limit=10)
-        memories = memories_data.get('memories', [])
+        from services.supermemory_client import get_recent_memories
+        memories = get_recent_memories(user_id, role=mode_key, limit=10)
         
         if not memories:
             return jsonify({'message': None})
@@ -921,13 +1013,13 @@ def proactive():
         ])
         
         # Generate proactive suggestion
-        prompt = f"""Based on these recent memories in {mode} mode:
+        prompt = f"""Based on these recent memories in {mode_label} mode:
 {recent_context}
 
 Generate a brief, helpful proactive message to start a conversation. Be specific and actionable.
 Examples:
+- Fitness: "You mentioned a workout goal this week. Want a 3-day plan?"
 - Student: "You mentioned a midterm next week. Want help planning revision?"
-- Parent: "You often add kids' activities on weekends. Want to plan this weekend?"
 - Job: "You applied to X jobs recently. Want to draft follow-up emails?"
 
 Keep it to one sentence, friendly and helpful."""

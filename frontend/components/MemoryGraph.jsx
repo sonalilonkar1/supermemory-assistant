@@ -291,7 +291,7 @@ function AdvancedMemoryGraphWrapper({ nodes, edges, userId }) {
   )
 }
 
-function MemoryGraph({ mode, userId }) {
+function MemoryGraph({ mode, modeLabel, userId }) {
   const [memories, setMemories] = useState([])
   const [graphData, setGraphData] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -317,8 +317,8 @@ function MemoryGraph({ mode, userId }) {
       } else {
         // Fallback to simple memories endpoint
         const memoriesResponse = await api.get('/memories', {
-          params: { mode, userId }
-        })
+        params: { mode, userId }
+      })
         const fetched = memoriesResponse.data.memories || []
         const strict = fetched.filter(m => (m.metadata?.mode || null) === mode)
         setMemories(strict)
@@ -388,7 +388,7 @@ function MemoryGraph({ mode, userId }) {
   return (
     <div className={styles['memory-graph-container']}>
       <div className={styles['graph-header']}>
-        <h2>Memory Graph - {mode.charAt(0).toUpperCase() + mode.slice(1)} Mode</h2>
+        <h2>Memory Graph - {(modeLabel || mode).toString()} Mode</h2>
         <div style={{ display: 'flex', gap: '0.5rem' }}>
           <button 
             onClick={() => setUseAdvancedGraph(!useAdvancedGraph)} 

@@ -21,11 +21,21 @@ def build_prompt(role: str, message: str, ctx: Dict[str, Any]) -> str:
         "student": "Student Coach - Help with homework, study planning, deadlines, and academic advice",
         "job": "Job-Hunt Assistant - Help with job applications, interview prep, career advice, and networking"
     }
-    
-    role_desc = role_descriptions.get(role, "Personal Assistant")
-    
+
     active_mode = ctx.get("active_mode") or role
     base_role = ctx.get("base_role") or role
+    mode_cfg = ctx.get("mode_config") or {}
+    mode_label = mode_cfg.get("label") or mode_cfg.get("name") or active_mode
+    mode_description = mode_cfg.get("description") or ""
+
+    # Behavior should follow the active mode (Fitness/Health), not the base_role (often student).
+    # base_role only influences slicing/expiry defaults, not the persona voice.
+    if mode_label and mode_description:
+        role_desc = f"{mode_label} - {mode_description}"
+    elif mode_label:
+        role_desc = str(mode_label)
+    else:
+        role_desc = role_descriptions.get(role, "Personal Assistant")
 
     prompt = f"""You are a multi-role personal assistant.
 Active mode: {active_mode} (base role: {base_role}).

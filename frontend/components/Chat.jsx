@@ -4,11 +4,13 @@ import React, { useState, useEffect, useRef } from 'react'
 import api from '@/lib/axios'
 import styles from '@/styles/Chat.module.css'
 
-function Chat({ mode, userId }) {
+function Chat({ mode, modeLabel, userId }) {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [useSearch, setUseSearch] = useState(false)
+  const [showDebugTools, setShowDebugTools] = useState(false)
+  const [showProactive, setShowProactive] = useState(false)
   const [pendingMessages, setPendingMessages] = useState([])
   const [proactiveMessage, setProactiveMessage] = useState(null)
   const messagesEndRef = useRef(null)
@@ -16,11 +18,19 @@ function Chat({ mode, userId }) {
   const pendingMessagesRef = useRef([])
 
   useEffect(() => {
-    // Load proactive message on mount
-    loadProactiveMessage()
     // Load per-mode chat history from localStorage (strict mode separation in UI)
     loadLocalChatHistory()
   }, [mode, userId])
+
+  useEffect(() => {
+    // Proactive is optional and hidden by default (user-facing UX)
+    if (!showProactive) {
+      setProactiveMessage(null)
+      return
+    }
+    loadProactiveMessage()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showProactive, mode, userId])
 
   useEffect(() => {
     // Persist per-mode chat history so switching modes doesn't mix messages
@@ -34,6 +44,87 @@ function Chat({ mode, userId }) {
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }
+
+  // Lightweight markdown rendering (no extra deps):
+  // - escapes HTML
+  // - supports **bold**, *italic*, `inline code`
+  // - supports simple bullet lists starting with "- " or "* "
+  const renderMarkdownLite = (text) => {
+    const raw = String(text ?? '')
+    const escaped = raw
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;')
+
+    const renderInline = (s) => {
+      let html = s
+      html = html.replace(/`([^`]+)`/g, '<code>$1</code>')
+      html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+      // Only treat *italic* when it's not a list marker (no space right after the opening asterisk)
+      html = html.replace(/\*(?!\s)([^*]+)\*/g, '<em>$1</em>')
+      return html
+    }
+
+    const lines = escaped.split('\n')
+    let out = ''
+    let inList = false
+    let inOl = false
+
+    const closeList = () => {
+      if (inList) {
+        out += '</ul>'
+        inList = false
+      }
+      if (inOl) {
+        out += '</ol>'
+        inOl = false
+      }
+    }
+
+    for (const line of lines) {
+      // Headings: ###, ##, #
+      const h = line.match(/^\s*(#{1,3})\s+(.*)$/)
+      if (h) {
+        closeList()
+        const level = h[1].length
+        const content = renderInline(h[2].trim())
+        const size = level === 1 ? '1.15rem' : level === 2 ? '1.05rem' : '1rem'
+        out += `<div style="font-weight:800;margin:0.4rem 0 0.25rem;font-size:${size};">${content}</div>`
+        continue
+      }
+
+      // Numbered list: "1. item"
+      const n = line.match(/^\s*(\d+)\.\s+(.*)$/)
+      if (n) {
+        if (!inOl) {
+          closeList()
+          out += '<ol style="margin: 0.25rem 0 0.25rem 1.25rem; padding: 0;">'
+          inOl = true
+        }
+        out += `<li style="margin: 0.15rem 0;">${renderInline(n[2])}</li>`
+        continue
+      }
+
+      const m = line.match(/^\s*([-*])\s+(.*)$/)
+      if (m) {
+        if (!inList) {
+          closeList()
+          out += '<ul style="margin: 0.25rem 0 0.25rem 1.25rem; padding: 0;">'
+          inList = true
+        }
+        out += `<li style="margin: 0.15rem 0;">${renderInline(m[2])}</li>`
+      } else {
+        closeList()
+        const trimmed = line.trimEnd()
+        // Paragraphs: wrap non-empty lines, keep blank lines as spacing
+        out += trimmed ? `<div style="margin:0.15rem 0;">${renderInline(trimmed)}</div>` : '<div style="height:0.4rem;"></div>'
+      }
+    }
+    closeList()
+    return out
   }
 
   const storageKey = () => `sm-chat:${userId || 'default'}:${mode}`
@@ -220,23 +311,65 @@ function Chat({ mode, userId }) {
   return (
     <div className={styles['chat-container']}>
       <div className={styles['chat-header']}>
-        <h2>Chat - {mode.charAt(0).toUpperCase() + mode.slice(1)} Mode</h2>
-        <label className={styles['search-toggle']}>
-          <input
-            type="checkbox"
-            checked={useSearch}
-            onChange={(e) => setUseSearch(e.target.checked)}
-          />
-          <span>Use Web Search</span>
-        </label>
+        <h2>Chat - {(modeLabel || mode).toString()} Mode</h2>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+          <label className={styles['search-toggle']}>
+            <input
+              type="checkbox"
+              checked={useSearch}
+              onChange={(e) => setUseSearch(e.target.checked)}
+            />
+            <span>Use Web Search</span>
+          </label>
+
+          <label className={styles['search-toggle']} style={{ opacity: 0.85 }}>
+            <input
+              type="checkbox"
+              checked={showProactive}
+              onChange={(e) => setShowProactive(e.target.checked)}
+            />
+            <span>Show Proactive</span>
+          </label>
+
+          <label className={styles['search-toggle']} style={{ opacity: 0.85 }}>
+            <input
+              type="checkbox"
+              checked={showDebugTools}
+              onChange={(e) => setShowDebugTools(e.target.checked)}
+            />
+            <span>Show Debug Tools</span>
+          </label>
+        </div>
       </div>
 
       <div className={styles['chat-messages']}>
         {proactiveMessage && (
           <div className={`${styles.message} ${styles.proactive}`}>
             <div className={styles['message-content']}>
-              <span className={styles['proactive-label']}>⚡ Proactive</span>
-              <p>{proactiveMessage}</p>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem' }}>
+                <span className={styles['proactive-label']}>Proactive</span>
+                <button
+                  type="button"
+                  onClick={() => setProactiveMessage(null)}
+                  style={{
+                    border: 'none',
+                    background: 'transparent',
+                    cursor: 'pointer',
+                    color: '#856404',
+                    fontWeight: 800,
+                    fontSize: '1rem',
+                    lineHeight: 1,
+                  }}
+                  aria-label="Dismiss proactive suggestion"
+                  title="Dismiss"
+                >
+                  ×
+                </button>
+              </div>
+              <div
+                style={{ marginTop: '0.25rem' }}
+                dangerouslySetInnerHTML={{ __html: renderMarkdownLite(proactiveMessage) }}
+              />
             </div>
           </div>
         )}
@@ -244,8 +377,11 @@ function Chat({ mode, userId }) {
         {messages.map((message, index) => (
           <div key={index} className={`${styles.message} ${styles[message.role]}`}>
             <div className={styles['message-content']}>
-              <p>{message.content}</p>
-              {message.toolsUsed && message.toolsUsed.length > 0 && (
+              <div
+                style={{ whiteSpace: 'normal' }}
+                dangerouslySetInnerHTML={{ __html: renderMarkdownLite(message.content) }}
+              />
+              {showDebugTools && message.toolsUsed && message.toolsUsed.length > 0 && (
                 <div className={styles['tools-used']}>
                   <span className={styles['tools-label']}>🔧 Tools:</span>
                   {message.toolsUsed.map((tool, i) => (

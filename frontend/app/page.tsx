@@ -10,19 +10,17 @@ import { isAuthenticated, getUser, clearAuth } from '@/lib/auth'
 import api from '@/lib/axios'
 import styles from '@/styles/App.module.css'
 
-const BUILTIN_MODES = [
-  { id: 'student', name: 'Student Assistant', emoji: '🎓', baseRole: 'student', isCustom: false },
-  { id: 'parent', name: 'Parent / Family Planner', emoji: '👨‍👩‍👧', baseRole: 'parent', isCustom: false },
-  { id: 'job', name: 'Job-Hunt Assistant', emoji: '💼', baseRole: 'job', isCustom: false }
-]
-
 export default function Home() {
   const router = useRouter()
-  const [currentMode, setCurrentMode] = useState('student')
-  const [activeTab, setActiveTab] = useState('chat')
+  const [currentMode, setCurrentMode] = useState<string | null>(null)
+  const [activeTab, setActiveTab] = useState<'chat' | 'memories' | 'graph' | 'upcoming'>('chat')
   const [user, setUser] = useState(getUser())
   const [loading, setLoading] = useState(true)
-  const [modes, setModes] = useState(BUILTIN_MODES)
+  const [modes, setModes] = useState<any[]>([])
+  const [templates, setTemplates] = useState<any[]>([])
+  const [events, setEvents] = useState<any[]>([])
+  const [eventsLoading, setEventsLoading] = useState(false)
+  const currentModeObj = modes.find((m: any) => m.id === currentMode) || null
 
   useEffect(() => {
     // Check authentication
@@ -35,24 +33,51 @@ export default function Home() {
   }, [router])
 
   useEffect(() => {
-    // Fetch user-defined modes from backend
+    // Fetch user-defined modes from backend (empty means user hasn't created any)
     const loadModes = async () => {
       try {
         const res = await api.get('/modes')
         const fetched = res.data?.modes
-        if (Array.isArray(fetched) && fetched.length) {
-          setModes(fetched)
-          // If currentMode is not available anymore, fallback
-          const exists = fetched.some((m: any) => m.id === currentMode)
-          if (!exists) setCurrentMode(fetched[0].id)
-        }
+        const list = Array.isArray(fetched) ? fetched : []
+        setModes(list)
+        if (list.length && !currentMode) setCurrentMode(list[0].id)
+        if (list.length && currentMode && !list.some((m: any) => m.id === currentMode)) setCurrentMode(list[0].id)
       } catch (e) {
-        // Ignore; fallback to built-ins
+        setModes([])
       }
     }
     if (isAuthenticated()) loadModes()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id])
+
+  useEffect(() => {
+    const loadTemplates = async () => {
+      try {
+        const res = await api.get('/mode-templates')
+        setTemplates(Array.isArray(res.data?.templates) ? res.data.templates : [])
+      } catch (e) {
+        setTemplates([])
+      }
+    }
+    if (isAuthenticated()) loadTemplates()
+  }, [])
+
+  const loadUpcomingEvents = async () => {
+    try {
+      setEventsLoading(true)
+      const res = await api.get('/events/upcoming', { params: { limit: 50 } })
+      setEvents(Array.isArray(res.data?.events) ? res.data.events : [])
+    } catch (e) {
+      setEvents([])
+    } finally {
+      setEventsLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (activeTab === 'upcoming') loadUpcomingEvents()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab])
 
   const handleLogout = () => {
     clearAuth()
@@ -71,6 +96,96 @@ export default function Home() {
 
   if (!user) {
     return null // Will redirect
+  }
+
+  // First-run onboarding: user must create at least one mode (templates are optional suggestions)
+  if (!currentMode) {
+    return (
+      <div className={styles.app}>
+        <header className={styles['app-header']}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
+            <h1>Supermemory Assistant</h1>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+              <span style={{ fontSize: '0.9rem', opacity: 0.9 }}>{user.name || user.email}</span>
+              <button
+                onClick={handleLogout}
+                style={{
+                  padding: '0.5rem 1rem',
+                  background: 'rgba(255, 255, 255, 0.2)',
+                  border: '1px solid rgba(255, 255, 255, 0.3)',
+                  borderRadius: '8px',
+                  color: 'white',
+                  cursor: 'pointer',
+                  fontSize: '0.85rem',
+                  fontWeight: 500,
+                }}
+              >
+                🚪 Logout
+              </button>
+            </div>
+          </div>
+        </header>
+
+        <main className={styles['app-main']} style={{ padding: '2rem' }}>
+          <div style={{ maxWidth: 960, margin: '0 auto' }}>
+            <h2 style={{ marginBottom: '0.5rem' }}>What parts of your life do you want help with?</h2>
+            <p style={{ marginBottom: '1.25rem', color: '#6c757d' }}>
+              Create modes for your roles (e.g., “Job Hunt – Spring 2026”, “Marathon training”, etc). Nothing is pre-added.
+            </p>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
+              {templates.map((t) => (
+                <button
+                  key={t.key}
+                  onClick={async () => {
+                    const res = await api.post('/modes', {
+                      name: t.name,
+                      emoji: t.emoji,
+                      baseRole: t.baseRole,
+                      description: t.description,
+                      defaultTags: t.defaultTags || [],
+                      crossModeSources: t.crossModeSources || [],
+                      key: t.key,
+                    })
+                    const created = res.data?.mode
+                    if (created) {
+                      setModes([created])
+                      setCurrentMode(created.id)
+                    }
+                  }}
+                  style={{
+                    padding: '1rem',
+                    borderRadius: 16,
+                    border: '1px solid #e9ecef',
+                    background: 'white',
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                    boxShadow: '0 2px 10px rgba(0,0,0,0.08)',
+                  }}
+                >
+                  <div style={{ fontSize: '1.6rem' }}>{t.emoji}</div>
+                  <div style={{ fontWeight: 800, marginTop: '0.35rem' }}>{t.name}</div>
+                  <div style={{ fontSize: '0.9rem', color: '#6c757d', marginTop: '0.35rem' }}>{t.description}</div>
+                </button>
+              ))}
+            </div>
+
+            <div style={{ marginTop: '1.25rem' }}>
+              <p style={{ marginBottom: '0.5rem', fontWeight: 700 }}>Or create your own:</p>
+              <ModeSelector
+                modes={[]}
+                currentMode={''}
+                onModeChange={() => {}}
+                onModeCreated={(createdMode: any) => {
+                  setModes([createdMode])
+                  setCurrentMode(createdMode.id)
+                }}
+              />
+            </div>
+          </div>
+        </main>
+      </div>
+    )
   }
 
   return (
@@ -173,17 +288,93 @@ export default function Home() {
         >
           📊 Memory Graph
         </button>
+
+        <button
+          className={activeTab === 'upcoming' ? styles.active : ''}
+          onClick={() => setActiveTab('upcoming')}
+          style={{
+            padding: '0.875rem 1.75rem',
+            margin: 0,
+            border: '2px solid transparent',
+            borderRadius: '12px',
+            fontSize: '0.95rem',
+            fontWeight: 600,
+            cursor: 'pointer',
+            transition: 'all 0.3s ease',
+            background: activeTab === 'upcoming' ? '#667eea' : 'transparent',
+            color: activeTab === 'upcoming' ? 'white' : 'inherit'
+          }}
+        >
+          📅 Upcoming
+        </button>
       </nav>
 
       <main className={styles['app-main']}>
         <div style={{ display: activeTab === 'chat' ? 'block' : 'none' }}>
-          <Chat mode={currentMode} userId={user.id} />
+          <Chat mode={currentMode} modeLabel={currentModeObj?.name} userId={user.id} />
         </div>
         <div style={{ display: activeTab === 'memories' ? 'block' : 'none' }}>
-          <Memories mode={currentMode} userId={user.id} />
+          <Memories mode={currentMode} modeLabel={currentModeObj?.name} userId={user.id} />
         </div>
         <div style={{ display: activeTab === 'graph' ? 'block' : 'none' }}>
-          <MemoryGraph mode={currentMode} userId={user.id} />
+          <MemoryGraph mode={currentMode} modeLabel={currentModeObj?.name} userId={user.id} />
+        </div>
+        <div style={{ display: activeTab === 'upcoming' ? 'block' : 'none' }}>
+          <div style={{ padding: '2rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h2 style={{ margin: 0 }}>Upcoming Events (All Modes)</h2>
+              <button
+                onClick={loadUpcomingEvents}
+                style={{
+                  padding: '0.6rem 1rem',
+                  background: '#667eea',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '10px',
+                  cursor: 'pointer',
+                  fontWeight: 700
+                }}
+              >
+                🔄 Refresh
+              </button>
+            </div>
+
+            {eventsLoading ? (
+              <div style={{ padding: '1.5rem 0', color: '#6c757d' }}>Loading events...</div>
+            ) : events.length === 0 ? (
+              <div style={{ padding: '1.5rem 0', color: '#6c757d' }}>
+                No upcoming events yet. Add dates like “Interview on 2026-03-07” or “Exam on March 5”.
+              </div>
+            ) : (
+              <div style={{ marginTop: '1rem', display: 'grid', gap: '0.75rem' }}>
+                {events.map((e) => (
+                  <div
+                    key={e.id}
+                    style={{
+                      background: 'white',
+                      border: '1px solid #e9ecef',
+                      borderRadius: 14,
+                      padding: '1rem',
+                      boxShadow: '0 2px 10px rgba(0,0,0,0.06)',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      gap: '1rem',
+                    }}
+                  >
+                    <div>
+                      <div style={{ fontWeight: 800 }}>{e.title}</div>
+                      <div style={{ fontSize: '0.9rem', color: '#6c757d', marginTop: '0.25rem' }}>
+                        {new Date(e.date).toLocaleString()}
+                      </div>
+                    </div>
+                    <div style={{ alignSelf: 'center', fontWeight: 800 }}>
+                      {e.modeEmoji} {e.modeName}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       </main>
     </div>

@@ -4,7 +4,7 @@ import React, { useState, useEffect } from 'react'
 import api from '@/lib/axios'
 import styles from '@/styles/Memories.module.css'
 
-function Memories({ mode, userId }) {
+function Memories({ mode, modeLabel, userId }) {
   const [memories, setMemories] = useState([])
   const [loading, setLoading] = useState(true)
   const [editingId, setEditingId] = useState(null)
@@ -83,7 +83,7 @@ function Memories({ mode, userId }) {
   return (
     <div className={styles['memories-container']}>
       <div className={styles['memories-header']}>
-        <h2>Memories - {mode.charAt(0).toUpperCase() + mode.slice(1)} Mode</h2>
+        <h2>Memories - {(modeLabel || mode).toString()} Mode</h2>
         <button onClick={loadMemories} className={styles['refresh-btn']}>
           🔄 Refresh
         </button>

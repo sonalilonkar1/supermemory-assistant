@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import api from '@/lib/axios'
 import styles from '@/styles/ModeSelector.module.css'
 
@@ -14,10 +14,23 @@ function ModeSelector({ modes, currentMode, onModeChange, onModeCreated }) {
   const [crossModeSources, setCrossModeSources] = useState([]) // array of mode keys
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const [templates, setTemplates] = useState([])
+  const [templatesLoaded, setTemplatesLoaded] = useState(false)
 
   if (!modes || modes.length === 0) {
     return <div style={{ color: 'white', padding: '1rem' }}>No modes available</div>
   }
+
+  const availableBorrowSources = useMemo(() => {
+    const byId = new Map()
+    ;(modes || []).forEach((m) => byId.set(m.id, m))
+    ;(templates || []).forEach((t) => {
+      if (!byId.has(t.key)) {
+        byId.set(t.key, { id: t.key, name: t.name, emoji: t.emoji })
+      }
+    })
+    return Array.from(byId.values())
+  }, [modes, templates])
 
   const resetForm = () => {
     setName('')
@@ -32,6 +45,35 @@ function ModeSelector({ modes, currentMode, onModeChange, onModeCreated }) {
   const close = () => {
     setIsOpen(false)
     resetForm()
+  }
+
+  const loadTemplates = async () => {
+    if (templatesLoaded) return
+    try {
+      const res = await api.get('/mode-templates')
+      const list = Array.isArray(res.data?.templates) ? res.data.templates : []
+      setTemplates(list)
+    } catch (e) {
+      setTemplates([])
+    } finally {
+      setTemplatesLoaded(true)
+    }
+  }
+
+  useEffect(() => {
+    if (isOpen) loadTemplates()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen])
+
+  const applyTemplate = (t) => {
+    // Pre-fill but keep editable
+    setName(t.name || '')
+    setEmoji(t.emoji || '✨')
+    setBaseRole(t.baseRole || 'student')
+    setDescription(t.description || '')
+    setDefaultTags(Array.isArray(t.defaultTags) ? t.defaultTags.join(', ') : '')
+    setCrossModeSources(Array.isArray(t.crossModeSources) ? t.crossModeSources : [])
+    setError('')
   }
 
   const handleCreate = async () => {
@@ -160,6 +202,8 @@ function ModeSelector({ modes, currentMode, onModeChange, onModeCreated }) {
               borderRadius: '16px',
               padding: '1.25rem 1.25rem 1rem',
               boxShadow: '0 16px 40px rgba(0,0,0,0.25)',
+              maxHeight: '85vh',
+              overflowY: 'auto',
             }}
             onClick={(e) => e.stopPropagation()}
           >
@@ -175,13 +219,60 @@ function ModeSelector({ modes, currentMode, onModeChange, onModeCreated }) {
             </div>
 
             <div style={{ marginTop: '1rem', display: 'grid', gap: '0.75rem' }}>
+              {/* Template gallery */}
+              <div style={{ display: 'grid', gap: '0.5rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                  <span style={{ fontSize: '0.9rem', fontWeight: 800 }}>Templates</span>
+                  <span style={{ fontSize: '0.8rem', color: '#6b7280' }}>Click to pre-fill</span>
+                </div>
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
+                    gap: '0.5rem',
+                  }}
+                >
+                  {(templates || []).map((t) => (
+                    <button
+                      key={t.key}
+                      type="button"
+                      onClick={() => applyTemplate(t)}
+                      style={{
+                        border: '1px solid #e5e7eb',
+                        borderRadius: 12,
+                        padding: '0.6rem 0.7rem',
+                        background: 'white',
+                        cursor: 'pointer',
+                        textAlign: 'left',
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <span style={{ fontSize: '1.2rem' }}>{t.emoji}</span>
+                        <span style={{ fontWeight: 800, fontSize: '0.9rem' }}>{t.name}</span>
+                      </div>
+                      {t.description ? (
+                        <div style={{ marginTop: '0.25rem', fontSize: '0.8rem', color: '#6b7280' }}>
+                          {t.description}
+                        </div>
+                      ) : null}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               <label style={{ display: 'grid', gap: '0.35rem' }}>
                 <span style={{ fontSize: '0.9rem', fontWeight: 600 }}>Mode name</span>
                 <input
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   placeholder="e.g., Fitness Coach"
-                  style={{ padding: '0.65rem 0.75rem', borderRadius: '10px', border: '1px solid #e5e7eb' }}
+                  style={{
+                    padding: '0.65rem 0.75rem',
+                    borderRadius: '10px',
+                    border: '1px solid #e5e7eb',
+                    background: '#fff',
+                    color: '#111827',
+                  }}
                 />
               </label>
 
@@ -192,7 +283,13 @@ function ModeSelector({ modes, currentMode, onModeChange, onModeCreated }) {
                     value={emoji}
                     onChange={(e) => setEmoji(e.target.value)}
                     placeholder="✨"
-                    style={{ padding: '0.65rem 0.75rem', borderRadius: '10px', border: '1px solid #e5e7eb' }}
+                    style={{
+                      padding: '0.65rem 0.75rem',
+                      borderRadius: '10px',
+                      border: '1px solid #e5e7eb',
+                      background: '#fff',
+                      color: '#111827',
+                    }}
                   />
                 </label>
 
@@ -201,7 +298,13 @@ function ModeSelector({ modes, currentMode, onModeChange, onModeCreated }) {
                   <select
                     value={baseRole}
                     onChange={(e) => setBaseRole(e.target.value)}
-                    style={{ padding: '0.65rem 0.75rem', borderRadius: '10px', border: '1px solid #e5e7eb' }}
+                    style={{
+                      padding: '0.65rem 0.75rem',
+                      borderRadius: '10px',
+                      border: '1px solid #e5e7eb',
+                      background: '#fff',
+                      color: '#111827',
+                    }}
                   >
                     <option value="student">Student</option>
                     <option value="parent">Parent</option>
@@ -217,7 +320,14 @@ function ModeSelector({ modes, currentMode, onModeChange, onModeCreated }) {
                   onChange={(e) => setDescription(e.target.value)}
                   placeholder="What is this mode for?"
                   rows={3}
-                  style={{ padding: '0.65rem 0.75rem', borderRadius: '10px', border: '1px solid #e5e7eb', resize: 'vertical' }}
+                  style={{
+                    padding: '0.65rem 0.75rem',
+                    borderRadius: '10px',
+                    border: '1px solid #e5e7eb',
+                    resize: 'vertical',
+                    background: '#fff',
+                    color: '#111827',
+                  }}
                 />
               </label>
 
@@ -227,14 +337,20 @@ function ModeSelector({ modes, currentMode, onModeChange, onModeCreated }) {
                   value={defaultTags}
                   onChange={(e) => setDefaultTags(e.target.value)}
                   placeholder="e.g., health, fitness, habits"
-                  style={{ padding: '0.65rem 0.75rem', borderRadius: '10px', border: '1px solid #e5e7eb' }}
+                  style={{
+                    padding: '0.65rem 0.75rem',
+                    borderRadius: '10px',
+                    border: '1px solid #e5e7eb',
+                    background: '#fff',
+                    color: '#111827',
+                  }}
                 />
               </label>
 
               <div style={{ display: 'grid', gap: '0.35rem' }}>
                 <span style={{ fontSize: '0.9rem', fontWeight: 600 }}>Cross-mode sources (borrow from)</span>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
-                  {modes.map((m) => (
+                  {availableBorrowSources.map((m) => (
                     <label key={m.id} style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.9rem' }}>
                       <input
                         type="checkbox"
