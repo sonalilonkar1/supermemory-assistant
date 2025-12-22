@@ -54,6 +54,8 @@ function Connectors({ userId }) {
   const [loading, setLoading] = useState(true)
   const [connecting, setConnecting] = useState(null)
   const [syncing, setSyncing] = useState(null)
+  const [calendarUploading, setCalendarUploading] = useState(false)
+  const calendarInputRef = React.useRef(null)
 
   useEffect(() => {
     loadConnectors()
@@ -143,6 +145,27 @@ function Connectors({ userId }) {
   }
 
   const handleDisconnect = async (provider) => {
+
+  const handleCalendarUpload = async (file) => {
+    if (!file) return
+    setCalendarUploading(true)
+    try {
+      const formData = new FormData()
+      formData.append('file', file)
+      formData.append('mode', 'default')
+      const res = await api.post('/calendar/import', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      })
+      alert(`Imported ${res.data?.imported || 0} events`)
+    } catch (error) {
+      console.error('Error importing calendar:', error)
+      alert(`Failed to import calendar: ${error.response?.data?.error || error.message}`)
+    } finally {
+      setCalendarUploading(false)
+      if (calendarInputRef.current) calendarInputRef.current.value = ''
+    }
+  }
+
     if (!confirm(`Are you sure you want to disconnect ${provider}?`)) {
       return
     }
@@ -247,6 +270,39 @@ function Connectors({ userId }) {
             </div>
           )
         })}
+      </div>
+
+
+      <div className={styles.grid}>
+        <div
+          className={`${styles.card}`}
+          style={{ borderColor: '#2563eb' }}
+        >
+          <div className={styles.cardHeader}>
+            <span className={styles.emoji}>📅</span>
+            <h3>Calendar (.ics)</h3>
+            <span className={`${styles.status} ${styles.connected}`} title="manual">
+              ●
+            </span>
+          </div>
+          <p className={styles.description}>Import events from an ICS file to create event memories.</p>
+          <div className={styles.actions}>
+            <input
+              type="file"
+              accept=".ics,text/calendar"
+              ref={calendarInputRef}
+              style={{ display: 'none' }}
+              onChange={(e) => handleCalendarUpload(e.target.files?.[0])}
+            />
+            <button
+              onClick={() => calendarInputRef.current?.click()}
+              disabled={calendarUploading}
+              className={styles.syncButton}
+            >
+              {calendarUploading ? 'Importing...' : '📥 Import .ics'}
+            </button>
+          </div>
+        </div>
       </div>
 
       {connectors.length === 0 && (

@@ -9,7 +9,7 @@ function Chat({ mode, modeLabel, userId }) {
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [useSearch, setUseSearch] = useState(false)
-  const [showDebugTools, setShowDebugTools] = useState(false)
+  const [showDebugTools, setShowDebugTools] = useState(true)
   const [showProactive, setShowProactive] = useState(false)
   const [pendingMessages, setPendingMessages] = useState([])
   const [proactiveMessage, setProactiveMessage] = useState(null)

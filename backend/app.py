@@ -8,6 +8,8 @@ import requests
 import json
 import uuid
 from typing import List, Dict
+import importlib
+from calendar_routes import register_calendar_routes
 from models import db, User, Conversation, Message, Task, UserMode, Connector, UserProfile
 from services.memory_orchestrator import build_context_for_turn
 from services.llm import call_gemini
@@ -34,6 +36,9 @@ CORS(app,
      allow_headers=["Content-Type", "Authorization"],
      methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 
+# Register calendar routes
+register_calendar_routes(app)
+
 # Create tables
 with app.app_context():
     db.create_all()
@@ -57,27 +62,42 @@ with app.app_context():
     
     # Ensure connectors table exists
     try:
-        db.session.execute(db.text("""
-            CREATE TABLE IF NOT EXISTS connectors (
-                id VARCHAR(36) PRIMARY KEY,
-                user_id VARCHAR(36) NOT NULL,
-                provider VARCHAR(50) NOT NULL,
-                connection_id VARCHAR(255),
-                status VARCHAR(20) DEFAULT 'pending',
-                metadata TEXT,
-                last_sync_at DATETIME,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(user_id, provider)
-            )
-        """))
-        db.session.execute(db.text("CREATE INDEX IF NOT EXISTS idx_connectors_user_id ON connectors(user_id)"))
-        db.session.execute(db.text("CREATE INDEX IF NOT EXISTS idx_connectors_provider ON connectors(provider)"))
-        db.session.execute(db.text("CREATE INDEX IF NOT EXISTS idx_connectors_status ON connectors(status)"))
+        # Check if table exists
+        table_exists = db.session.execute(db.text("""
+            SELECT name FROM sqlite_master 
+            WHERE type='table' AND name='connectors'
+        """)).fetchone()
+        
+        if not table_exists:
+            # Create new table with correct column name
+            db.session.execute(db.text("""
+                CREATE TABLE connectors (
+                    id VARCHAR(36) PRIMARY KEY,
+                    user_id VARCHAR(36) NOT NULL,
+                    provider VARCHAR(50) NOT NULL,
+                    connection_id VARCHAR(255),
+                    status VARCHAR(20) DEFAULT 'pending',
+                    connector_metadata TEXT,
+                    last_sync_at DATETIME,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, provider)
+                )
+            """))
+            db.session.execute(db.text("CREATE INDEX idx_connectors_user_id ON connectors(user_id)"))
+            db.session.execute(db.text("CREATE INDEX idx_connectors_provider ON connectors(provider)"))
+            db.session.execute(db.text("CREATE INDEX idx_connectors_status ON connectors(status)"))
+        else:
+            # Table exists - check if we need to migrate from 'metadata' to 'connector_metadata'
+            columns = [row[1] for row in db.session.execute(db.text("PRAGMA table_info(connectors)")).fetchall()]
+            if 'metadata' in columns and 'connector_metadata' not in columns:
+                # Migrate: rename metadata column to connector_metadata
+                db.session.execute(db.text("ALTER TABLE connectors RENAME COLUMN metadata TO connector_metadata"))
+        
         db.session.commit()
     except Exception as e:
         db.session.rollback()
-        print(f"[DB Migration] Skipping connectors table creation: {e}")
+        print(f"[DB Migration] Skipping connectors table creation/migration: {e}")
 
 # Mode templates (suggestions). Not automatically created for a user.
 MODE_TEMPLATES = [
@@ -1085,15 +1105,16 @@ def get_memories_endpoint():
         user = get_user_from_token(request)
         user_id = user.id if user else request.args.get('userId', 'default')
         
-        mode = request.args.get('mode', 'student')
+        mode = request.args.get('mode')  # Can be None for "all" filter
         
-        print(f"[Get Memories] Fetching memories for user_id={user_id}, mode={mode}")
+        print(f"[Get Memories] Fetching memories for user_id={user_id}, mode={mode or 'all'}")
         
         # Use the supermemory_client function directly with correct user_id and role
         from services.supermemory_client import get_recent_memories
         
-        # Get recent memories (strictly filtered by role inside get_recent_memories)
-        memories = get_recent_memories(user_id, role=mode, limit=50)
+        # Get recent memories (strictly filtered by role inside get_recent_memories if mode provided)
+        # If mode is None, get_recent_memories will return all memories for the user
+        memories = get_recent_memories(user_id, role=mode, limit=200 if mode is None else 50)
         
         # Format memories for frontend
         formatted_memories = []
@@ -1102,8 +1123,8 @@ def get_memories_endpoint():
             text = mem.get('text') or mem.get('content', '')
             metadata = mem.get('metadata', {})
 
-            # Extra safety: enforce strict mode separation at the API boundary too
-            if (metadata or {}).get('mode') != mode:
+            # Extra safety: enforce strict mode separation at the API boundary if mode is specified
+            if mode and (metadata or {}).get('mode') != mode:
                 continue
             
             formatted_memories.append({
@@ -1358,12 +1379,12 @@ def get_memory_graph():
         if not user:
             return jsonify({'error': 'Unauthorized'}), 401
         
-        role = request.args.get('role')  # Optional filter by mode_key
+        role = request.args.get('role')  # Optional filter by mode_key (None = all modes)
         user_id = user.id
         
         # Get all memories for the user (optionally filtered by role)
         from services.supermemory_client import get_recent_memories
-        memories = get_recent_memories(user_id, role=role, limit=100)
+        memories = get_recent_memories(user_id, role=role, limit=200 if role is None else 100)
         
         nodes = []
         edges = []
@@ -1691,7 +1712,7 @@ def connect_connector(provider: str):
                 provider=provider,
                 connection_id=auth_info.get('connectionId'),
                 status='pending' if auth_info.get('requiresOAuth') else 'connected',
-                metadata=json.dumps(auth_info)
+                connector_metadata=json.dumps(auth_info)
             )
             db.session.add(connector)
         
@@ -1794,6 +1815,88 @@ def disconnect_connector(provider: str):
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
 
+
+# --- Calendar / ICS Import (simple) ---
+def _parse_ics_events(ics_text: str):
+    events = []
+    current = {}
+    for raw in (ics_text or "").splitlines():
+        line = raw.strip()
+        upper = line.upper()
+        if upper.startswith("BEGIN:VEVENT"):
+            current = {}
+        elif upper.startswith("END:VEVENT"):
+            if current.get("summary"):
+                events.append(current)
+            current = {}
+        elif upper.startswith("SUMMARY:"):
+            current["summary"] = line.split("SUMMARY:", 1)[1].strip()
+        elif upper.startswith("DTSTART"):
+            if ":" in line:
+                dt_raw = line.split(":", 1)[1].strip()
+                if "T" in dt_raw and len(dt_raw) >= 8:
+                    yyyy = dt_raw[0:4]; mm = dt_raw[4:6]; dd = dt_raw[6:8]
+                    current["event_date"] = f"{yyyy}-{mm}-{dd}"
+                elif len(dt_raw) == 8:
+                    yyyy = dt_raw[0:4]; mm = dt_raw[4:6]; dd = dt_raw[6:8]
+                    current["event_date"] = f"{yyyy}-{mm}-{dd}"
+    return events
+
+@app.route('/api/calendar/import', methods=['POST'])
+def import_calendar():
+    """Import calendar events from an ICS file or text and create event memories."""
+    try:
+        user = get_user_from_token(request)
+        if not user:
+            return jsonify({'error': 'Unauthorized'}), 401
+
+        mode = request.form.get('mode') or request.args.get('mode') or 'default'
+        ics_text = None
+
+        if 'file' in request.files:
+            f = request.files['file']
+            ics_text = f.read().decode('utf-8', errors='ignore')
+        else:
+            ics_text = request.form.get('ics') or request.get_data(as_text=True)
+
+        if not ics_text:
+            return jsonify({'error': 'No ICS content provided'}), 400
+
+        events = _parse_ics_events(ics_text)
+        if not events:
+            return jsonify({'error': 'No events found in ICS'}), 400
+
+        created = []
+        for ev in events:
+            summary = ev.get("summary") or "Calendar event"
+            event_date = ev.get("event_date")
+            text = f"Event: {summary}"
+            metadata = {
+                'mode': mode,
+                'source': 'calendar_import',
+                'type': 'event',
+                'title': summary,
+                'createdAt': datetime.now(timezone.utc).isoformat(),
+                'userId': user.id
+            }
+            if event_date:
+                metadata['event_date'] = event_date
+                metadata['expires_at'] = event_date
+
+            classification = classify_memory(mode, text)
+            if classification.get('durability'):
+                metadata['durability'] = classification['durability']
+            if classification.get('expires_at') and not metadata.get('expires_at'):
+                metadata['expires_at'] = classification['expires_at']
+
+            result = create_memory(user.id, text, metadata, role=mode)
+            if result and result.get('id'):
+                created.append(result.get('id'))
+
+        return jsonify({'imported': len(created), 'ids': created})
+    except Exception as e:
+        print(f"Error importing calendar: {e}")
+        return jsonify({'error': str(e)}), 500
+
 if __name__ == '__main__':
     app.run(debug=True, port=5001)
-

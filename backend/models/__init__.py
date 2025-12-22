@@ -169,7 +169,7 @@ class Connector(db.Model):
     provider = db.Column(db.String(50), nullable=False, index=True)  # gmail, linkedin, google-drive, etc.
     connection_id = db.Column(db.String(255), nullable=True)  # Supermemory connection ID
     status = db.Column(db.String(20), default='pending', index=True)  # pending, connected, error, disconnected
-    metadata = db.Column(db.Text, nullable=True)  # JSON string for provider-specific data
+    connector_metadata = db.Column(db.Text, nullable=True)  # JSON string for provider-specific data (renamed from 'metadata' - reserved in SQLAlchemy)
     last_sync_at = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -181,7 +181,7 @@ class Connector(db.Model):
     def to_dict(self):
         import json
         try:
-            metadata = json.loads(self.metadata) if self.metadata else {}
+            metadata = json.loads(self.connector_metadata) if self.connector_metadata else {}
         except Exception:
             metadata = {}
         

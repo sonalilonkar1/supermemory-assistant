@@ -234,3 +234,16 @@ MIT
 - [Google Gemini](https://ai.google.dev/) for intelligent responses
 - [Parallel.ai](https://parallel.ai) and [Exa.ai](https://exa.ai) for web search capabilities
 
+
+
+## New features
+- Calendar import: POST /api/calendar/import (upload .ics) or use the Connectors tab to import .ics files and create event memories (type=event, event_date).
+- Tool visibility: tool calls are shown by default in chat (no toggle needed).
+- File upload: upload docs/images to create memories.
+
+## Calendar import (quick steps)
+- In Connectors, use the "Calendar (.ics)" card to upload an .ics file.
+- Backend endpoint: POST /api/calendar/import (form-data: file=.ics, mode=<mode>).
+
+## Tool visibility
+- Chat now shows tools used (memory.search, memory.write, web.search) by default.

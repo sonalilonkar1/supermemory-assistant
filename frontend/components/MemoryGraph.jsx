@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useEffect, Suspense } from 'react'
+import React, { useState, useEffect, Suspense, useRef } from 'react'
 import api from '@/lib/axios'
 import styles from '@/styles/MemoryGraph.module.css'
 
@@ -72,6 +72,127 @@ class GraphErrorBoundary extends React.Component {
 
     return this.props.children
   }
+}
+
+
+// Lightweight custom SVG view (no hexagons) for visual refresh
+function CustomGraph({ graphData, onSelect }) {
+  const containerRef = useRef(null)
+  const [size, setSize] = useState({ width: 900, height: 520 })
+
+  useEffect(() => {
+    const updateSize = () => {
+      if (containerRef.current) {
+        setSize({
+          width: containerRef.current.clientWidth,
+          height: Math.max(containerRef.current.clientHeight, 420),
+        })
+      }
+    }
+    updateSize()
+    window.addEventListener('resize', updateSize)
+    return () => window.removeEventListener('resize', updateSize)
+  }, [])
+
+  const { width, height } = size
+  const nodes = graphData?.nodes || []
+  const edges = graphData?.edges || graphData?.links || []
+
+  const radius = Math.max(Math.min(width, height) / 2 - 80, 120)
+  const cx = width / 2
+  const cy = height / 2
+
+  const laidOutNodes = nodes.map((n, idx) => {
+    const angle = (idx / Math.max(nodes.length, 1)) * Math.PI * 2
+    return {
+      ...n,
+      x: cx + radius * Math.cos(angle),
+      y: cy + radius * Math.sin(angle),
+    }
+  })
+
+  const nodeMap = new Map(laidOutNodes.map(n => [n.id, n]))
+
+  const renderNodeShape = (node) => {
+    const type = node.type || node.group || 'memory'
+    const common = {
+      key: node.id,
+      stroke: '#0f172a',
+      strokeWidth: 2,
+      style: { filter: 'drop-shadow(0 2px 6px rgba(0,0,0,0.25))', cursor: 'pointer' },
+      onClick: () => onSelect && onSelect(node),
+    }
+    if (type === 'document') {
+      return (
+        <rect
+          {...common}
+          x={node.x - 10}
+          y={node.y - 10}
+          width={20}
+          height={20}
+          rx={4}
+          fill="#10b981"
+        />
+      )
+    }
+    if (type === 'user') {
+      return (
+        <polygon
+          {...common}
+          points={`${node.x},${node.y - 12} ${node.x + 12},${node.y} ${node.x},${node.y + 12} ${node.x - 12},${node.y}`}
+          fill="#f59e0b"
+        />
+      )
+    }
+    return (
+      <circle
+        {...common}
+        cx={node.x}
+        cy={node.y}
+        r={9}
+        fill="#6366f1"
+      />
+    )
+  }
+
+  return (
+    <div ref={containerRef} className={styles.customGraphContainer}>
+      <svg width={width} height={height} className={styles.customGraphSvg}>
+        {edges.map((e, idx) => {
+          const s = nodeMap.get(e.source)
+          const t = nodeMap.get(e.target)
+          if (!s || !t) return null
+          return (
+            <line
+              key={`edge-${idx}`}
+              x1={s.x}
+              y1={s.y}
+              x2={t.x}
+              y2={t.y}
+              stroke="#94a3b8"
+              strokeWidth={2}
+              strokeLinecap="round"
+              opacity={0.6}
+            />
+          )
+        })}
+        {laidOutNodes.map(renderNodeShape)}
+        {laidOutNodes.map((n, idx) => (
+          <text
+            key={`label-${idx}`}
+            x={n.x}
+            y={n.y - 16}
+            textAnchor="middle"
+            fill="#e2e8f0"
+            fontSize="11"
+            fontWeight="600"
+          >
+            {(n.label || '').slice(0, 18)}
+          </text>
+        ))}
+      </svg>
+    </div>
+  )
 }
 
 // Wrapper component to handle prop validation
@@ -296,6 +417,8 @@ function MemoryGraph({ mode, modeLabel, userId }) {
   const [graphData, setGraphData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [useAdvancedGraph, setUseAdvancedGraph] = useState(false)
+  const [useCustomView, setUseCustomView] = useState(true)
+  const [selectedNode, setSelectedNode] = useState(null)
 
   useEffect(() => {
     loadGraphData()
@@ -385,13 +508,30 @@ function MemoryGraph({ mode, modeLabel, userId }) {
 
   const displayData = graphData || getSimpleGraphData()
 
+  const handleGraphToggle = () => {
+    if (!useAdvancedGraph) {
+      setUseAdvancedGraph(true)
+      return
+    }
+    setUseCustomView(!useCustomView)
+  }
+
+  const handleSimpleView = () => {
+    setUseAdvancedGraph(false)
+    setSelectedNode(null)
+  }
+
+  const handleNodeSelect = (node) => {
+    setSelectedNode(node)
+  }
+
   return (
     <div className={styles['memory-graph-container']}>
       <div className={styles['graph-header']}>
         <h2>Memory Graph - {(modeLabel || mode).toString()} Mode</h2>
         <div style={{ display: 'flex', gap: '0.5rem' }}>
           <button 
-            onClick={() => setUseAdvancedGraph(!useAdvancedGraph)} 
+            onClick={handleGraphToggle} 
             className={styles['toggle-btn']}
             style={{
               background: useAdvancedGraph ? '#667eea' : 'transparent',
@@ -402,10 +542,10 @@ function MemoryGraph({ mode, modeLabel, userId }) {
               cursor: 'pointer'
             }}
           >
-            {useAdvancedGraph ? '🔄 Advanced View' : '✨ Use Advanced Graph'}
+            {useAdvancedGraph ? (useCustomView ? '🔄 Custom View' : '🔄 Advanced View') : '✨ Graph View'}
           </button>
-          <button onClick={loadGraphData} className={styles['refresh-btn']}>
-          🔄 Refresh
+          <button onClick={handleSimpleView} className={styles['refresh-btn']} style={{ background: '#e5e7eb', color: '#111827' }}>
+          Simple View
         </button>
         </div>
       </div>
@@ -429,31 +569,43 @@ function MemoryGraph({ mode, modeLabel, userId }) {
           </div>
 
           {useAdvancedGraph ? (
-            <div 
-              className={styles['advanced-graph-container']}
-              style={{
-                width: '100%',
-                height: '70vh',
-                minHeight: '560px',
-                border: '1px solid #e9ecef',
-                borderRadius: '12px',
-                background: '#fff',
-                position: 'relative',
-                overflow: 'hidden'
-              }}
-            >
-              <Suspense fallback={
-                <div className={styles.loading} style={{ padding: '2rem' }}>
-                  Loading advanced graph...
+            useCustomView ? (
+              <div className={styles['advanced-graph-container']} style={{ width: '100%', height: '70vh', minHeight: '560px', border: '1px solid #dfe3eb', borderRadius: '14px', background: "radial-gradient(circle at 20% 20%, #111827 0%, #0b1220 45%, #0a0f1a 100%)", position: 'relative', overflow: 'hidden', boxShadow: '0 10px 30px rgba(0,0,0,0.2)', padding: '0.5rem' }}>
+                <CustomGraph graphData={displayData} onSelect={handleNodeSelect} />
+                <div className={styles.legendRow}>
+                  <span className={`${styles.legendChip}`}><span className={`${styles.legendDot} ${styles.memory}`}></span>Memory</span>
+                  <span className={`${styles.legendChip}`}><span className={`${styles.legendDot} ${styles.document}`}></span>Document</span>
+                  <span className={`${styles.legendChip}`}><span className={`${styles.legendDot} ${styles.user}`}></span>User</span>
+                  <span className={`${styles.legendChip}`}><span className={`${styles.legendDot} ${styles.edge}`}></span>Edge</span>
                 </div>
-              }>
-                <AdvancedMemoryGraphWrapper
-                  nodes={displayData.nodes || []}
-                  edges={displayData.edges || []}
-                  userId={userId}
-                />
-              </Suspense>
-            </div>
+              </div>
+            ) : (
+              <div 
+                className={styles['advanced-graph-container']}
+                style={{
+                  width: '100%',
+                  height: '70vh',
+                  minHeight: '560px',
+                  border: '1px solid #e9ecef',
+                  borderRadius: '12px',
+                  background: '#fff',
+                  position: 'relative',
+                  overflow: 'hidden'
+                }}
+              >
+                <Suspense fallback={
+                  <div className={styles.loading} style={{ padding: '2rem' }}>
+                    Loading advanced graph...
+                  </div>
+                }>
+                  <AdvancedMemoryGraphWrapper
+                    nodes={displayData.nodes || []}
+                    edges={displayData.edges || []}
+                    userId={userId}
+                  />
+                </Suspense>
+              </div>
+            )
           ) : (
             <div className={styles['graph-visualization']}>
               <div className={styles['graph-nodes']}>
@@ -506,3 +658,29 @@ function MemoryGraph({ mode, modeLabel, userId }) {
 
 export default MemoryGraph
 
+
+      {/* Detail Drawer for Custom View */}
+      {useAdvancedGraph && useCustomView && selectedNode && (
+        <div className={styles.drawerOverlay} onClick={() => setSelectedNode(null)}>
+          <div className={styles.drawer} onClick={(e) => e.stopPropagation()}>
+            <div className={styles.drawerHeader}>
+              <h3>Memory Detail</h3>
+              <button className={styles.drawerClose} onClick={() => setSelectedNode(null)}>×</button>
+            </div>
+            <div className={styles.drawerContent}>
+              <div className={styles.detailSection}>
+                <label>Label</label>
+                <div className={styles.detailValue}>{selectedNode.label || 'Untitled'}</div>
+              </div>
+              <div className={styles.detailSection}>
+                <label>Type</label>
+                <div className={styles.detailValue}>{selectedNode.type || selectedNode.group || 'memory'}</div>
+              </div>
+              <div className={styles.detailSection}>
+                <label>ID</label>
+                <div className={styles.detailValue}>{selectedNode.id}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
