@@ -282,12 +282,17 @@ def get_recent_memories(user_id: str, role: Optional[str] = None, limit: int = 5
         traceback.print_exc()
         return []
 
-def create_memory(user_id: str, text: str, metadata: dict, role: Optional[str] = None):
+def create_memory(user_id: str, text: str, metadata: dict, role: Optional[str] = None, extra_container_tags: Optional[List[str]] = None):
     """Create a new memory in Supermemory"""
     try:
         container_tags = [user_id] if user_id != 'default' else []
         if role:
             container_tags.append(f"{user_id}-{role}")
+        if extra_container_tags:
+            container_tags.extend([t for t in extra_container_tags if t])
+            # de-dupe preserving order
+            seen = set()
+            container_tags = [x for x in container_tags if not (x in seen or seen.add(x))]
         
         print(f"[Memory Creation] Attempting to create memory for user_id={user_id}, role={role}")
         print(f"[Memory Creation] Text preview: {text[:100]}...")

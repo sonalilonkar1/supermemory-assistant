@@ -7,12 +7,13 @@ import Memories from '@/components/Memories'
 import MemoryGraph from '@/components/MemoryGraph'
 import ModeSelector from '@/components/ModeSelector'
 import { isAuthenticated, getUser, clearAuth } from '@/lib/auth'
+import api from '@/lib/axios'
 import styles from '@/styles/App.module.css'
 
-const MODES = [
-  { id: 'student', name: 'Student Assistant', emoji: '🎓' },
-  { id: 'parent', name: 'Parent / Family Planner', emoji: '👨‍👩‍👧' },
-  { id: 'job', name: 'Job-Hunt Assistant', emoji: '💼' }
+const BUILTIN_MODES = [
+  { id: 'student', name: 'Student Assistant', emoji: '🎓', baseRole: 'student', isCustom: false },
+  { id: 'parent', name: 'Parent / Family Planner', emoji: '👨‍👩‍👧', baseRole: 'parent', isCustom: false },
+  { id: 'job', name: 'Job-Hunt Assistant', emoji: '💼', baseRole: 'job', isCustom: false }
 ]
 
 export default function Home() {
@@ -21,6 +22,7 @@ export default function Home() {
   const [activeTab, setActiveTab] = useState('chat')
   const [user, setUser] = useState(getUser())
   const [loading, setLoading] = useState(true)
+  const [modes, setModes] = useState(BUILTIN_MODES)
 
   useEffect(() => {
     // Check authentication
@@ -31,6 +33,26 @@ export default function Home() {
       setLoading(false)
     }
   }, [router])
+
+  useEffect(() => {
+    // Fetch user-defined modes from backend
+    const loadModes = async () => {
+      try {
+        const res = await api.get('/modes')
+        const fetched = res.data?.modes
+        if (Array.isArray(fetched) && fetched.length) {
+          setModes(fetched)
+          // If currentMode is not available anymore, fallback
+          const exists = fetched.some((m: any) => m.id === currentMode)
+          if (!exists) setCurrentMode(fetched[0].id)
+        }
+      } catch (e) {
+        // Ignore; fallback to built-ins
+      }
+    }
+    if (isAuthenticated()) loadModes()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id])
 
   const handleLogout = () => {
     clearAuth()
@@ -87,9 +109,12 @@ export default function Home() {
           </div>
         </div>
         <ModeSelector
-          modes={MODES}
+          modes={modes}
           currentMode={currentMode}
           onModeChange={setCurrentMode}
+          onModeCreated={(createdMode: any) => {
+            setModes((prev: any[]) => [...prev, createdMode])
+          }}
         />
       </header>
 

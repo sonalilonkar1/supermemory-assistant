@@ -24,7 +24,12 @@ def build_prompt(role: str, message: str, ctx: Dict[str, Any]) -> str:
     
     role_desc = role_descriptions.get(role, "Personal Assistant")
     
-    prompt = f"""You are a multi-role personal assistant. Current role: {role_desc}.
+    active_mode = ctx.get("active_mode") or role
+    base_role = ctx.get("base_role") or role
+
+    prompt = f"""You are a multi-role personal assistant.
+Active mode: {active_mode} (base role: {base_role}).
+Current role behavior: {role_desc}.
 
 Static user profile (high level):
 {format_static_profile(ctx.get("static_profile", {}))}

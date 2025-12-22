@@ -8,7 +8,7 @@ import requests
 import json
 import uuid
 from typing import List, Dict
-from models import db, User, Conversation, Message, Task, UserProfile
+from models import db, User, Conversation, Message, Task, UserMode, UserProfile
 from services.memory_orchestrator import build_context_for_turn
 from services.llm import call_gemini
 from services.memory_classifier import classify_memory
@@ -37,6 +37,232 @@ CORS(app,
 # Create tables
 with app.app_context():
     db.create_all()
+    # Lightweight migration for existing SQLite DBs (no Alembic)
+    def _ensure_columns(table_name: str, columns: Dict[str, str]):
+        try:
+            existing = [row[1] for row in db.session.execute(db.text(f"PRAGMA table_info({table_name})")).fetchall()]
+            for col, col_sql in columns.items():
+                if col not in existing:
+                    db.session.execute(db.text(f"ALTER TABLE {table_name} ADD COLUMN {col} {col_sql}"))
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            print(f"[DB Migration] Skipping migration for {table_name}: {e}")
+
+    _ensure_columns("user_modes", {
+        "description": "TEXT",
+        "default_tags": "TEXT",
+        "cross_mode_sources": "TEXT",
+    })
+
+BUILTIN_MODES = [
+    {
+        "id": "student",
+        "key": "student",
+        "name": "Student Assistant",
+        "emoji": "🎓",
+        "baseRole": "student",
+        "description": "Homework, study planning, deadlines, and academic advice.",
+        "defaultTags": ["student"],
+        "crossModeSources": ["job"],
+        "isCustom": False,
+    },
+    {
+        "id": "parent",
+        "key": "parent",
+        "name": "Parent / Family Planner",
+        "emoji": "👨‍👩‍👧",
+        "baseRole": "parent",
+        "description": "Family planning, kids' activities, scheduling, and household organization.",
+        "defaultTags": ["parent"],
+        "crossModeSources": ["student"],
+        "isCustom": False,
+    },
+    {
+        "id": "job",
+        "key": "job",
+        "name": "Job-Hunt Assistant",
+        "emoji": "💼",
+        "baseRole": "job",
+        "description": "Job applications, interview prep, resume strategy, and networking.",
+        "defaultTags": ["job"],
+        "crossModeSources": ["student"],
+        "isCustom": False,
+    },
+]
+
+def slugify_mode_key(name: str) -> str:
+    import re
+    s = (name or "").strip().lower()
+    s = re.sub(r'[^a-z0-9]+', '-', s)
+    s = re.sub(r'-{2,}', '-', s).strip('-')
+    return s[:40] if s else "mode"
+
+def resolve_mode(user_id: str, mode_key: str) -> Dict[str, any]:
+    """
+    Resolve an incoming mode key into:
+    - modeKey: the actual scope key used for memory tagging/isolation
+    - baseRole: controls behavior/profile slicing/cross-role policy (student|parent|job)
+    - displayName: optional
+    """
+    mode_key = (mode_key or "student").strip()
+    # Built-ins
+    for m in BUILTIN_MODES:
+        if m["key"] == mode_key:
+            return {
+                "modeKey": mode_key,
+                "baseRole": m["baseRole"],
+                "label": m["name"],
+                "description": m.get("description", ""),
+                "defaultTags": m.get("defaultTags", []),
+                "crossModeSources": m.get("crossModeSources", []),
+                "isCustom": False,
+            }
+
+    # Custom mode
+    try:
+        custom = UserMode.query.filter_by(user_id=user_id, key=mode_key).first()
+        if custom:
+            base = custom.base_role if custom.base_role in ["student", "parent", "job"] else "student"
+            import json
+            try:
+                default_tags = json.loads(custom.default_tags) if custom.default_tags else []
+            except Exception:
+                default_tags = []
+            try:
+                cross_sources = json.loads(custom.cross_mode_sources) if custom.cross_mode_sources else []
+            except Exception:
+                cross_sources = []
+
+            return {
+                "modeKey": mode_key,
+                "baseRole": base,
+                "label": custom.name,
+                "description": custom.description or "",
+                "defaultTags": default_tags,
+                "crossModeSources": cross_sources,
+                "isCustom": True,
+            }
+    except Exception:
+        pass
+
+    # Fallback
+    return {
+        "modeKey": mode_key,
+        "baseRole": "student",
+        "label": mode_key,
+        "description": "",
+        "defaultTags": [],
+        "crossModeSources": [],
+        "isCustom": True,
+    }
+
+@app.route('/api/modes', methods=['GET'])
+def list_modes():
+    """List built-in + user-defined modes"""
+    user = get_user_from_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    custom = UserMode.query.filter_by(user_id=user.id).order_by(UserMode.created_at.asc()).all()
+    modes = []
+    modes.extend(BUILTIN_MODES)
+    for m in custom:
+        md = m.to_dict()
+        modes.append({
+            "id": md["key"],
+            "key": md["key"],
+            "name": md["name"],
+            "emoji": md.get("emoji") or "✨",
+            "baseRole": md.get("baseRole") or "student",
+            "description": md.get("description") or "",
+            "defaultTags": md.get("defaultTags") or [],
+            "crossModeSources": md.get("crossModeSources") or [],
+            "isCustom": True,
+        })
+    return jsonify({"modes": modes})
+
+@app.route('/api/modes', methods=['POST'])
+def create_mode():
+    """Create a new custom mode for the current user"""
+    user = get_user_from_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    data = request.json or {}
+    name = (data.get('name') or '').strip()
+    emoji = (data.get('emoji') or '✨').strip()
+    base_role = (data.get('baseRole') or 'student').strip()
+    description = (data.get('description') or '').strip()
+    default_tags = data.get('defaultTags') or []
+    cross_sources = data.get('crossModeSources') or []
+
+    if not name:
+        return jsonify({'error': 'Mode name is required'}), 400
+    if base_role not in ['student', 'parent', 'job']:
+        base_role = 'student'
+
+    # Normalize list fields
+    if not isinstance(default_tags, list):
+        default_tags = []
+    default_tags = [str(t).strip() for t in default_tags if str(t).strip()]
+    if not isinstance(cross_sources, list):
+        cross_sources = []
+    cross_sources = [str(s).strip() for s in cross_sources if str(s).strip()]
+
+    key = (data.get('key') or slugify_mode_key(name)).strip()
+    if key in ['student', 'parent', 'job']:
+        key = f"{key}-{uuid.uuid4().hex[:4]}"
+
+    # Ensure unique per user
+    exists = UserMode.query.filter_by(user_id=user.id, key=key).first()
+    if exists:
+        key = f"{key}-{uuid.uuid4().hex[:4]}"
+
+    new_mode = UserMode(
+        id=str(uuid.uuid4()),
+        user_id=user.id,
+        key=key,
+        name=name,
+        emoji=emoji[:4],
+        base_role=base_role,
+        description=description,
+        default_tags=json.dumps(default_tags),
+        cross_mode_sources=json.dumps(cross_sources),
+    )
+    db.session.add(new_mode)
+    db.session.commit()
+
+    return jsonify({
+        "mode": {
+            "id": new_mode.key,
+            "key": new_mode.key,
+            "name": new_mode.name,
+            "emoji": new_mode.emoji or "✨",
+            "baseRole": new_mode.base_role or "student",
+            "description": new_mode.description or "",
+            "defaultTags": default_tags,
+            "crossModeSources": cross_sources,
+            "isCustom": True,
+        }
+    }), 201
+
+@app.route('/api/modes/<mode_key>', methods=['DELETE'])
+def delete_mode(mode_key: str):
+    """Delete a custom mode (does not delete memories; only removes the mode from the selector)"""
+    user = get_user_from_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    if mode_key in ['student', 'parent', 'job']:
+        return jsonify({'error': 'Cannot delete built-in modes'}), 400
+
+    mode = UserMode.query.filter_by(user_id=user.id, key=mode_key).first()
+    if not mode:
+        return jsonify({'error': 'Mode not found'}), 404
+
+    db.session.delete(mode)
+    db.session.commit()
+    return jsonify({'success': True})
 
 # Configuration
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
@@ -292,10 +518,12 @@ def write_back_memories(user_id: str, role: str, user_message: str, llm_response
     
     # Create session summary memory
     summary_text = f"User asked: {user_message[:150]}. Assistant provided guidance on this topic."
-    classification = classify_memory(role, summary_text)
+    base_role = context_bundle.get("base_role") or role
+    classification = classify_memory(base_role, summary_text)
     
     metadata = {
-        'mode': role,
+        'mode': role,  # mode key for strict UI separation
+        'base_role': base_role,
         'source': 'chat',
         'createdAt': datetime.now(timezone.utc).isoformat(),
         'userId': user_id,
@@ -304,7 +532,13 @@ def write_back_memories(user_id: str, role: str, user_message: str, llm_response
     }
     
     print(f"[Write Back] Creating summary memory: {summary_text[:80]}...")
-    result = create_memory(user_id, summary_text, metadata, role=role)
+    # IMPORTANT: role=mode key to keep containerTags mode-scoped
+    # Use defaultTags from mode config as extra container tags (for future boosting/filters)
+    mode_cfg = context_bundle.get("mode_config") or {}
+    extra_tags = []
+    for t in (mode_cfg.get("defaultTags") or []):
+        extra_tags.append(f"tag:{t}")
+    result = create_memory(user_id, summary_text, metadata, role=role, extra_container_tags=extra_tags)
     if result and result.get('id'):
         memory_ids.append(result['id'])
         print(f"[Write Back] ✅ Summary memory created: {result.get('id')}")
@@ -318,9 +552,10 @@ def write_back_memories(user_id: str, role: str, user_message: str, llm_response
     
     if has_keywords:
         fact_text = f"Important: {llm_response[:200]}"
-        fact_classification = classify_memory(role, fact_text)
+        fact_classification = classify_memory(base_role, fact_text)
         fact_metadata = {
-            'mode': role,
+            'mode': role,  # mode key for strict UI separation
+            'base_role': base_role,
             'source': 'chat',
             'type': 'fact',
             'createdAt': datetime.now(timezone.utc).isoformat(),
@@ -330,7 +565,7 @@ def write_back_memories(user_id: str, role: str, user_message: str, llm_response
         }
         
         print(f"[Write Back] Creating fact memory: {fact_text[:80]}...")
-        fact_result = create_memory(user_id, fact_text, fact_metadata, role=role)
+        fact_result = create_memory(user_id, fact_text, fact_metadata, role=role, extra_container_tags=extra_tags)
         if fact_result and fact_result.get('id'):
             memory_ids.append(fact_result['id'])
             print(f"[Write Back] ✅ Fact memory created: {fact_result.get('id')}")
@@ -454,15 +689,20 @@ def chat():
         # Override with authenticated user if available
         if not user:
             user_id = data.get('userId', 'default')
-        mode = data.get('mode', 'student')
+        mode_key = data.get('mode', 'student')
         messages = data.get('messages', [])
         use_search = data.get('useSearch', False)
         
         # Join multiple rapid messages into one
         user_message = ' '.join(messages) if isinstance(messages, list) else messages
+
+        # Resolve custom mode -> base role (behavior) while keeping mode_key as the memory/conversation scope
+        mode_info = resolve_mode(user_id, mode_key)
+        mode_key = mode_info.get("modeKey", mode_key)
+        base_role = mode_info.get("baseRole", mode_key)
         
         # Build context bundle using orchestrator
-        context_bundle = build_context_for_turn(user_id, mode, user_message)
+        context_bundle = build_context_for_turn(user_id, mode_info, user_message)
         
         # Web search if requested
         web_results = []
@@ -480,7 +720,7 @@ def chat():
         try:
             llm_response, tool_traces = call_gemini(
                 user_id=user_id,
-                role=mode,
+                role=base_role,
                 message=user_message,
                 context_bundle=context_bundle
             )
@@ -510,8 +750,8 @@ def chat():
                     replies = filtered_parts
         
         # Write back memories with classification
-        print(f"[Chat] Writing back memories for user_id={user_id}, mode={mode}")
-        memory_ids = write_back_memories(user_id, mode, user_message, llm_response, context_bundle)
+        print(f"[Chat] Writing back memories for user_id={user_id}, mode={mode_key}, base_role={base_role}")
+        memory_ids = write_back_memories(user_id, mode_key, user_message, llm_response, context_bundle)
         print(f"[Chat] Memory creation result: {len(memory_ids)} memories created (IDs: {memory_ids})")
         
         # Save conversation history to database
@@ -521,7 +761,7 @@ def chat():
                 # Get or create conversation for this user and mode
                 conversation = Conversation.query.filter_by(
                     user_id=user_id,
-                    mode=mode
+                    mode=mode_key
                 ).order_by(Conversation.updated_at.desc()).first()
                 
                 # Create new conversation if none exists or if last one is older than 24 hours
@@ -541,7 +781,7 @@ def chat():
                     conversation = Conversation(
                         id=str(uuid.uuid4()),
                         user_id=user_id,
-                        mode=mode,
+                        mode=mode_key,
                         title=user_message[:50] + '...' if len(user_message) > 50 else user_message
                     )
                     db.session.add(conversation)
@@ -1002,7 +1242,7 @@ def get_memory_graph():
         if not user:
             return jsonify({'error': 'Unauthorized'}), 401
         
-        role = request.args.get('role')  # Optional filter by role
+        role = request.args.get('role')  # Optional filter by mode_key
         user_id = user.id
         
         # Get all memories for the user (optionally filtered by role)
@@ -1029,7 +1269,8 @@ def get_memory_graph():
             # Normalize memory text across API shapes
             text = mem.get('text') or mem.get('content') or mem.get('summary') or ''
             metadata = mem.get('metadata', {}) or {}
-            mem_role = metadata.get('mode', role or 'all')
+            mem_mode = metadata.get('mode', role or 'all')  # UI label + strict filter key
+            mem_role = metadata.get('base_role', mem_mode)  # behavior for entity extraction
             mem_id = mem.get('id') or ''
 
             # Always add a "memory" node per memory so the graph is never empty
@@ -1039,7 +1280,7 @@ def get_memory_graph():
                     "id": memory_node_id,
                     "label": (text[:80] + "…") if len(text) > 80 else (text or "Memory"),
                     "type": "memory",
-                    "role": mem_role,
+                    "role": mem_mode,
                     "sourceId": mem_id,
                     "metadata": metadata
                 })
@@ -1067,7 +1308,7 @@ def get_memory_graph():
                         "id": entity_id,
                         "label": entity['label'],
                         "type": entity['type'],
-                        "role": mem_role
+                        "role": mem_mode
                     })
                     node_ids.add(entity_id)
 
