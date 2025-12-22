@@ -160,8 +160,45 @@ class UserMode(db.Model):
             'isCustom': True,
         }
 
+class Connector(db.Model):
+    """Supermemory connector integration state"""
+    __tablename__ = 'connectors'
+    
+    id = db.Column(db.String(36), primary_key=True)
+    user_id = db.Column(db.String(36), db.ForeignKey('users.id'), nullable=False, index=True)
+    provider = db.Column(db.String(50), nullable=False, index=True)  # gmail, linkedin, google-drive, etc.
+    connection_id = db.Column(db.String(255), nullable=True)  # Supermemory connection ID
+    status = db.Column(db.String(20), default='pending', index=True)  # pending, connected, error, disconnected
+    metadata = db.Column(db.Text, nullable=True)  # JSON string for provider-specific data
+    last_sync_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    __table_args__ = (
+        db.UniqueConstraint('user_id', 'provider', name='uq_user_connector'),
+    )
+    
+    def to_dict(self):
+        import json
+        try:
+            metadata = json.loads(self.metadata) if self.metadata else {}
+        except Exception:
+            metadata = {}
+        
+        return {
+            'id': self.id,
+            'userId': self.user_id,
+            'provider': self.provider,
+            'connectionId': self.connection_id,
+            'status': self.status,
+            'metadata': metadata,
+            'lastSyncAt': self.last_sync_at.isoformat() if self.last_sync_at else None,
+            'createdAt': self.created_at.isoformat() if self.created_at else None,
+            'updatedAt': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
 # Export profile models
 from .profile import UserProfile, ParentProfile, StudentProfile, JobProfile
 
-__all__ = ['db', 'User', 'Conversation', 'Message', 'Task', 'UserMode', 'UserProfile', 'ParentProfile', 'StudentProfile', 'JobProfile']
+__all__ = ['db', 'User', 'Conversation', 'Message', 'Task', 'UserMode', 'Connector', 'UserProfile', 'ParentProfile', 'StudentProfile', 'JobProfile']
 

@@ -8,7 +8,7 @@ import requests
 import json
 import uuid
 from typing import List, Dict
-from models import db, User, Conversation, Message, Task, UserMode, UserProfile
+from models import db, User, Conversation, Message, Task, UserMode, Connector, UserProfile
 from services.memory_orchestrator import build_context_for_turn
 from services.llm import call_gemini
 from services.memory_classifier import classify_memory
@@ -54,6 +54,30 @@ with app.app_context():
         "default_tags": "TEXT",
         "cross_mode_sources": "TEXT",
     })
+    
+    # Ensure connectors table exists
+    try:
+        db.session.execute(db.text("""
+            CREATE TABLE IF NOT EXISTS connectors (
+                id VARCHAR(36) PRIMARY KEY,
+                user_id VARCHAR(36) NOT NULL,
+                provider VARCHAR(50) NOT NULL,
+                connection_id VARCHAR(255),
+                status VARCHAR(20) DEFAULT 'pending',
+                metadata TEXT,
+                last_sync_at DATETIME,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, provider)
+            )
+        """))
+        db.session.execute(db.text("CREATE INDEX IF NOT EXISTS idx_connectors_user_id ON connectors(user_id)"))
+        db.session.execute(db.text("CREATE INDEX IF NOT EXISTS idx_connectors_provider ON connectors(provider)"))
+        db.session.execute(db.text("CREATE INDEX IF NOT EXISTS idx_connectors_status ON connectors(status)"))
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        print(f"[DB Migration] Skipping connectors table creation: {e}")
 
 # Mode templates (suggestions). Not automatically created for a user.
 MODE_TEMPLATES = [
@@ -1513,6 +1537,262 @@ def extract_entities(text: str, role: str) -> List[Dict]:
             })
     
     return entities
+
+# File Upload Endpoint
+@app.route('/api/upload', methods=['POST'])
+def upload_file():
+    """Upload and process a file, creating memories from extracted content"""
+    try:
+        user = get_user_from_token(request)
+        if not user:
+            return jsonify({'error': 'Unauthorized'}), 401
+        
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file provided'}), 400
+        
+        file = request.files['file']
+        mode_key = request.form.get('mode', 'student')
+        
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
+        
+        # Process file using file_processor
+        from services.file_processor import process_file_upload
+        file_metadata = process_file_upload(file, user.id)
+        
+        if not file_metadata:
+            return jsonify({'error': 'Failed to process file'}), 400
+        
+        extracted_text = file_metadata.get('extracted_text', '')
+        if not extracted_text or len(extracted_text.strip()) < 10:
+            return jsonify({'error': 'No text could be extracted from file'}), 400
+        
+        # Resolve mode config
+        mode_info = resolve_mode(user.id, mode_key)
+        mode_key = mode_info.get("modeKey", mode_key)
+        base_role = mode_info.get("baseRole", mode_key)
+        
+        # Classify memory
+        classification = classify_memory(base_role, extracted_text)
+        
+        # Create memory from extracted text
+        metadata = {
+            'mode': mode_key,
+            'base_role': base_role,
+            'source': 'file_upload',
+            'filename': file_metadata.get('filename'),
+            'file_type': file_metadata.get('file_type'),
+            'file_size': file_metadata.get('file_size'),
+            'createdAt': datetime.now(timezone.utc).isoformat(),
+            'userId': user.id,
+            'durability': classification.get('durability', 'medium'),
+            'type': 'document'
+        }
+        if classification.get('type'):
+            metadata['type'] = classification.get('type')
+        if classification.get('event_date'):
+            metadata['event_date'] = classification.get('event_date')
+        
+        # Split large text into chunks if needed (max 5000 chars per memory)
+        memory_ids = []
+        text_chunks = []
+        if len(extracted_text) > 5000:
+            # Simple chunking by paragraphs
+            paragraphs = extracted_text.split('\n\n')
+            current_chunk = ''
+            for para in paragraphs:
+                if len(current_chunk) + len(para) + 2 > 5000:
+                    if current_chunk:
+                        text_chunks.append(current_chunk.strip())
+                    current_chunk = para
+                else:
+                    current_chunk += '\n\n' + para if current_chunk else para
+            if current_chunk:
+                text_chunks.append(current_chunk.strip())
+        else:
+            text_chunks = [extracted_text]
+        
+        # Create memories for each chunk
+        mode_cfg = mode_info or {}
+        extra_tags = []
+        for t in (mode_cfg.get("defaultTags") or []):
+            extra_tags.append(f"tag:{t}")
+        
+        for i, chunk in enumerate(text_chunks):
+            chunk_metadata = metadata.copy()
+            if len(text_chunks) > 1:
+                chunk_metadata['chunk_index'] = i
+                chunk_metadata['total_chunks'] = len(text_chunks)
+            
+            result = create_memory(user.id, chunk, chunk_metadata, role=mode_key, extra_container_tags=extra_tags)
+            if result and result.get('id'):
+                memory_ids.append(result['id'])
+        
+        return jsonify({
+            'success': True,
+            'memoryIds': memory_ids,
+            'fileMetadata': {
+                'filename': file_metadata.get('filename'),
+                'fileType': file_metadata.get('file_type'),
+                'fileSize': file_metadata.get('file_size'),
+                'textLength': file_metadata.get('text_length'),
+                'chunksCreated': len(text_chunks)
+            }
+        }), 201
+        
+    except Exception as e:
+        print(f"Error uploading file: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+# Connector Management Endpoints
+@app.route('/api/connectors', methods=['GET'])
+def list_connectors():
+    """List all connectors for the current user"""
+    try:
+        user = get_user_from_token(request)
+        if not user:
+            return jsonify({'error': 'Unauthorized'}), 401
+        
+        connectors = Connector.query.filter_by(user_id=user.id).all()
+        return jsonify({
+            'connectors': [conn.to_dict() for conn in connectors]
+        })
+    except Exception as e:
+        print(f"Error listing connectors: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/connectors/<provider>/connect', methods=['POST'])
+def connect_connector(provider: str):
+    """Initiate connection to a connector provider"""
+    try:
+        user = get_user_from_token(request)
+        if not user:
+            return jsonify({'error': 'Unauthorized'}), 401
+        
+        data = request.json or {}
+        redirect_url = data.get('redirectUrl', f'http://localhost:3000/connectors/callback')
+        
+        # Initiate connection via Supermemory API
+        from services.integrations import get_connector_auth_url
+        auth_info = get_connector_auth_url(user.id, provider, redirect_url)
+        
+        # Store connector state in database
+        existing = Connector.query.filter_by(user_id=user.id, provider=provider).first()
+        if existing:
+            existing.connection_id = auth_info.get('connectionId')
+            existing.status = 'pending' if auth_info.get('requiresOAuth') else 'connected'
+            existing.updated_at = datetime.now(timezone.utc)
+        else:
+            connector = Connector(
+                id=str(uuid.uuid4()),
+                user_id=user.id,
+                provider=provider,
+                connection_id=auth_info.get('connectionId'),
+                status='pending' if auth_info.get('requiresOAuth') else 'connected',
+                metadata=json.dumps(auth_info)
+            )
+            db.session.add(connector)
+        
+        db.session.commit()
+        
+        return jsonify({
+            'authUrl': auth_info.get('authUrl'),
+            'connectionId': auth_info.get('connectionId'),
+            'requiresOAuth': auth_info.get('requiresOAuth', False)
+        })
+    except Exception as e:
+        print(f"Error connecting {provider}: {e}")
+        db.session.rollback()
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/connectors/<provider>/callback', methods=['POST'])
+def connector_callback(provider: str):
+    """Handle OAuth callback and update connection status"""
+    try:
+        user = get_user_from_token(request)
+        if not user:
+            return jsonify({'error': 'Unauthorized'}), 401
+        
+        data = request.json or {}
+        connection_id = data.get('connectionId')
+        
+        if not connection_id:
+            return jsonify({'error': 'connectionId required'}), 400
+        
+        # Process callback
+        from services.integrations import process_connection_callback
+        result = process_connection_callback(provider, connection_id, user.id)
+        
+        # Update connector in database
+        connector = Connector.query.filter_by(user_id=user.id, provider=provider).first()
+        if connector:
+            connector.connection_id = connection_id
+            connector.status = 'connected' if result.get('success') else 'error'
+            connector.updated_at = datetime.now(timezone.utc)
+            connector.last_sync_at = datetime.now(timezone.utc) if result.get('success') else None
+            db.session.commit()
+        
+        return jsonify(result)
+    except Exception as e:
+        print(f"Error processing callback for {provider}: {e}")
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/connectors/<provider>/sync', methods=['POST'])
+def sync_connector(provider: str):
+    """Trigger manual sync for a connector"""
+    try:
+        user = get_user_from_token(request)
+        if not user:
+            return jsonify({'error': 'Unauthorized'}), 401
+        
+        connector = Connector.query.filter_by(user_id=user.id, provider=provider).first()
+        if not connector or not connector.connection_id:
+            return jsonify({'error': 'Connector not found or not connected'}), 404
+        
+        from services.integrations import sync_connection
+        result = sync_connection(connector.connection_id)
+        
+        if result.get('success'):
+            connector.last_sync_at = datetime.now(timezone.utc)
+            db.session.commit()
+        
+        return jsonify(result)
+    except Exception as e:
+        print(f"Error syncing {provider}: {e}")
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/connectors/<provider>', methods=['DELETE'])
+def disconnect_connector(provider: str):
+    """Disconnect a connector"""
+    try:
+        user = get_user_from_token(request)
+        if not user:
+            return jsonify({'error': 'Unauthorized'}), 401
+        
+        connector = Connector.query.filter_by(user_id=user.id, provider=provider).first()
+        if not connector:
+            return jsonify({'error': 'Connector not found'}), 404
+        
+        # Disconnect via Supermemory API
+        if connector.connection_id:
+            from services.integrations import disconnect_connection
+            disconnect_connection(connector.connection_id)
+        
+        # Remove from database
+        db.session.delete(connector)
+        db.session.commit()
+        
+        return jsonify({'success': True})
+    except Exception as e:
+        print(f"Error disconnecting {provider}: {e}")
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     app.run(debug=True, port=5001)

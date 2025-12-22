@@ -6,6 +6,7 @@ import Chat from '@/components/Chat'
 import Memories from '@/components/Memories'
 import MemoryGraph from '@/components/MemoryGraph'
 import ModeSelector from '@/components/ModeSelector'
+import Connectors from '@/components/Connectors'
 import { isAuthenticated, getUser, clearAuth } from '@/lib/auth'
 import api from '@/lib/axios'
 import styles from '@/styles/App.module.css'
@@ -13,7 +14,7 @@ import styles from '@/styles/App.module.css'
 export default function Home() {
   const router = useRouter()
   const [currentMode, setCurrentMode] = useState<string | null>(null)
-  const [activeTab, setActiveTab] = useState<'chat' | 'memories' | 'graph' | 'upcoming'>('chat')
+  const [activeTab, setActiveTab] = useState<'chat' | 'memories' | 'graph' | 'upcoming' | 'connectors'>('chat')
   const [user, setUser] = useState(getUser())
   const [loading, setLoading] = useState(true)
   const [modes, setModes] = useState<any[]>([])
@@ -307,6 +308,25 @@ export default function Home() {
         >
           📅 Upcoming
         </button>
+
+        <button
+          className={activeTab === 'connectors' ? styles.active : ''}
+          onClick={() => setActiveTab('connectors')}
+          style={{
+            padding: '0.875rem 1.75rem',
+            margin: 0,
+            border: '2px solid transparent',
+            borderRadius: '12px',
+            fontSize: '0.95rem',
+            fontWeight: 600,
+            cursor: 'pointer',
+            transition: 'all 0.3s ease',
+            background: activeTab === 'connectors' ? '#667eea' : 'transparent',
+            color: activeTab === 'connectors' ? 'white' : 'inherit'
+          }}
+        >
+          🔌 Connectors
+        </button>
       </nav>
 
       <main className={styles['app-main']}>
@@ -375,6 +395,9 @@ export default function Home() {
               </div>
             )}
           </div>
+        </div>
+        <div style={{ display: activeTab === 'connectors' ? 'block' : 'none' }}>
+          <Connectors userId={user.id} />
         </div>
       </main>
     </div>

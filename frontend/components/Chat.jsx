@@ -13,9 +13,13 @@ function Chat({ mode, modeLabel, userId }) {
   const [showProactive, setShowProactive] = useState(false)
   const [pendingMessages, setPendingMessages] = useState([])
   const [proactiveMessage, setProactiveMessage] = useState(null)
+  const [uploading, setUploading] = useState(false)
+  const [selectedFile, setSelectedFile] = useState(null)
+  const [dragActive, setDragActive] = useState(false)
   const messagesEndRef = useRef(null)
   const timeoutRef = useRef(null)
   const pendingMessagesRef = useRef([])
+  const fileInputRef = useRef(null)
 
   useEffect(() => {
     // Load per-mode chat history from localStorage (strict mode separation in UI)
@@ -308,19 +312,87 @@ function Chat({ mode, modeLabel, userId }) {
     }
   }
 
+  const handleFileSelect = async (file) => {
+    if (!file) return
+    
+    setSelectedFile(file)
+    setUploading(true)
+    
+    try {
+      const formData = new FormData()
+      formData.append('file', file)
+      formData.append('mode', mode)
+      
+      const response = await api.post('/upload', formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data'
+        }
+      })
+      
+      if (response.data.success) {
+        const fileMeta = response.data.fileMetadata
+        setMessages(prev => [...prev, {
+          role: 'assistant',
+          content: `✅ File "${fileMeta.filename}" uploaded successfully! Extracted ${fileMeta.textLength} characters and created ${fileMeta.chunksCreated} memory chunk(s).`,
+          timestamp: new Date()
+        }])
+      }
+    } catch (error) {
+      console.error('Error uploading file:', error)
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: `❌ Error uploading file: ${error.response?.data?.error || error.message}`,
+        timestamp: new Date()
+      }])
+    } finally {
+      setUploading(false)
+      setSelectedFile(null)
+      if (fileInputRef.current) {
+        fileInputRef.current.value = ''
+      }
+    }
+  }
+
+  const handleFileInputChange = (e) => {
+    const file = e.target.files?.[0]
+    if (file) {
+      handleFileSelect(file)
+    }
+  }
+
+  const handleDrag = (e) => {
+    e.preventDefault()
+    e.stopPropagation()
+    if (e.type === 'dragenter' || e.type === 'dragover') {
+      setDragActive(true)
+    } else if (e.type === 'dragleave') {
+      setDragActive(false)
+    }
+  }
+
+  const handleDrop = (e) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setDragActive(false)
+    
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      handleFileSelect(e.dataTransfer.files[0])
+    }
+  }
+
   return (
     <div className={styles['chat-container']}>
       <div className={styles['chat-header']}>
         <h2>Chat - {(modeLabel || mode).toString()} Mode</h2>
         <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
           <label className={styles['search-toggle']}>
-            <input
-              type="checkbox"
-              checked={useSearch}
-              onChange={(e) => setUseSearch(e.target.checked)}
-            />
-            <span>Use Web Search</span>
-          </label>
+          <input
+            type="checkbox"
+            checked={useSearch}
+            onChange={(e) => setUseSearch(e.target.checked)}
+          />
+          <span>Use Web Search</span>
+        </label>
 
           <label className={styles['search-toggle']} style={{ opacity: 0.85 }}>
             <input
@@ -413,19 +485,69 @@ function Chat({ mode, modeLabel, userId }) {
         <div ref={messagesEndRef} />
       </div>
 
-      <form className={styles['chat-input-form']} onSubmit={handleSubmit}>
-        <input
-          type="text"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder="Type your message..."
-          disabled={isLoading}
-        />
-        <button type="submit" disabled={isLoading || !input.trim()}>
-          Send
-        </button>
-      </form>
+      <div
+        onDragEnter={handleDrag}
+        onDragLeave={handleDrag}
+        onDragOver={handleDrag}
+        onDrop={handleDrop}
+        style={{
+          border: dragActive ? '2px dashed #3b82f6' : 'none',
+          borderRadius: '8px',
+          padding: dragActive ? '8px' : '0',
+          transition: 'all 0.2s'
+        }}
+      >
+        {uploading && (
+          <div style={{
+            padding: '8px 12px',
+            background: '#f3f4f6',
+            borderRadius: '6px',
+            marginBottom: '8px',
+            fontSize: '0.875rem',
+            color: '#6b7280'
+          }}>
+            📤 Uploading {selectedFile?.name}...
+          </div>
+        )}
+        
+        <form className={styles['chat-input-form']} onSubmit={handleSubmit}>
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleFileInputChange}
+            accept=".pdf,.png,.jpg,.jpeg,.gif,.docx,.xlsx,.xls,.csv,.txt"
+            style={{ display: 'none' }}
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={isLoading || uploading}
+            style={{
+              padding: '8px 12px',
+              background: '#f3f4f6',
+              border: '1px solid #d1d5db',
+              borderRadius: '6px',
+              cursor: isLoading || uploading ? 'not-allowed' : 'pointer',
+              fontSize: '0.875rem',
+              color: '#374151'
+            }}
+            title="Upload document or image"
+          >
+            📎
+          </button>
+          <input
+            type="text"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="Type your message..."
+            disabled={isLoading || uploading}
+          />
+          <button type="submit" disabled={isLoading || uploading || !input.trim()}>
+            Send
+          </button>
+        </form>
+      </div>
     </div>
   )
 }
