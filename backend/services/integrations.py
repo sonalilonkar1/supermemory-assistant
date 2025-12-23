@@ -61,8 +61,19 @@ def get_connector_auth_url(user_id: str, provider: str, redirect_url: str) -> Di
                 'requiresOAuth': False
             }
     except requests.exceptions.HTTPError as e:
-        print(f"Error initiating {provider} connection: {e.response.status_code} - {e.response.text}")
-        raise
+        error_msg = e.response.text if e.response else str(e)
+        status_code = e.response.status_code if e.response else 500
+        
+        # Handle specific error cases
+        if status_code == 403:
+            raise ValueError(f"This connector requires a Supermemory Pro plan or is not available for your account. Please check your subscription or try another connector.")
+        elif status_code == 400:
+            raise ValueError(f"Invalid request for {provider}. This connector may not be supported yet.")
+        elif status_code == 404:
+            raise ValueError(f"Connector '{provider}' is not available. Please check if it's supported.")
+        else:
+            print(f"Error initiating {provider} connection: {status_code} - {error_msg}")
+            raise ValueError(f"Failed to connect {provider}: {error_msg}")
 
 def get_connection_status(connection_id: str) -> Dict:
     """Get status of a Supermemory connection"""

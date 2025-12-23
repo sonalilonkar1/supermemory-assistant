@@ -12,21 +12,24 @@ const CONNECTOR_PROVIDERS = [
     name: 'Google Drive',
     emoji: '📁',
     description: 'Sync documents from your Google Drive',
-    color: '#4285F4'
+    color: '#4285F4',
+    note: 'May require Pro plan'
   },
   {
     id: 'notion',
     name: 'Notion',
     emoji: '📝',
     description: 'Import notes and pages from Notion',
-    color: '#000000'
+    color: '#000000',
+    note: 'May require Pro plan'
   },
   {
     id: 'onedrive',
     name: 'OneDrive',
     emoji: '☁️',
     description: 'Sync documents from Microsoft OneDrive',
-    color: '#0078D4'
+    color: '#0078D4',
+    note: 'May require Pro plan'
   },
   {
     id: 'web-crawler',
@@ -40,7 +43,8 @@ const CONNECTOR_PROVIDERS = [
     name: 'GitHub',
     emoji: '🐙',
     description: 'Ingest issues and repos (via Supermemory connector)',
-    color: '#24292e'
+    color: '#24292e',
+    note: 'May require Pro plan'
   }
 ]
 
@@ -121,7 +125,14 @@ function Connectors({ userId }) {
       }
     } catch (error) {
       console.error(`Error connecting ${provider}:`, error)
-      alert(`Failed to connect ${provider}: ${error.response?.data?.error || error.message}`)
+      const errorMessage = error.response?.data?.error || error.message || 'Unknown error'
+      
+      // Show user-friendly error message
+      if (error.response?.status === 403 || errorMessage.includes('Pro plan') || errorMessage.includes('not available')) {
+        alert(`⚠️ ${provider} connector is not available.\n\nThis connector may require a Supermemory Pro plan or is not supported for your account.\n\nYou can still use:\n• Calendar (.ics) import\n• File uploads\n• n8n workflows for Gmail/LinkedIn`)
+      } else {
+        alert(`Failed to connect ${provider}: ${errorMessage}`)
+      }
       setConnecting(null)
     }
   }
@@ -194,6 +205,18 @@ function Connectors({ userId }) {
         <p className={styles.subtitle}>
           Connect your accounts to automatically build your profile and import data
         </p>
+        <div style={{ 
+          marginTop: '1rem', 
+          padding: '0.75rem', 
+          background: '#fef3c7', 
+          border: '1px solid #fbbf24', 
+          borderRadius: '8px',
+          fontSize: '0.875rem',
+          color: '#92400e'
+        }}>
+          <strong>💡 Note:</strong> Some connectors (GitHub, Google Drive, OneDrive) may require a Supermemory Pro plan. 
+          You can still use <strong>File Upload</strong>, <strong>Calendar (.ics) Import</strong>, and <strong>n8n workflows</strong> to import data.
+        </div>
       </div>
 
       <div className={styles.grid}>
@@ -224,6 +247,11 @@ function Connectors({ userId }) {
               </div>
 
               <p className={styles.description}>{provider.description}</p>
+              {provider.note && (
+                <div style={{ fontSize: '0.75rem', color: '#6b7280', marginTop: '0.25rem', fontStyle: 'italic' }}>
+                  {provider.note}
+                </div>
+              )}
               {comingSoon && <div className={styles.comingSoon}>Coming soon</div>}
 
               {connector?.lastSyncAt && (

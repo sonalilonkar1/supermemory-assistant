@@ -367,45 +367,120 @@ def upcoming_events():
                 if any(pattern in text_lower for pattern in ['assistant', 'thanks', 'i can help', 'want me']):
                     continue
             
-            # Extract clean event title
+            # Extract clean event title - make it brief and concise
             title = md.get('title') or ''
             if not title:
-                # Try to extract event name from text patterns
                 import re
-                # Patterns: "Event: X", "X on Y", "X - Y", "X meeting", "X exam"
-                patterns = [
-                    r'Event:\s*(.+?)(?:\.|$|on|at)',
-                    r'(.+?)\s+(?:on|at|tomorrow|next week|coming up)',
-                    r'(.+?)\s+(?:meeting|exam|interview|appointment|event)',
-                    r'^(.+?)(?:\s*-\s*.+)?$',  # First part before dash
-                ]
-                for pattern in patterns:
-                    match = re.search(pattern, text, re.IGNORECASE)
-                    if match:
-                        title = match.group(1).strip()
-                        # Clean up common prefixes
-                        title = re.sub(r'^(User asked:|Assistant|Important:)\s*', '', title, flags=re.IGNORECASE)
-                        if len(title) > 5 and len(title) < 100:
-                            break
+                text_clean = text
                 
-                # Fallback: use first sentence or first 60 chars
-                if not title or len(title) < 5:
-                    # Get first sentence
-                    first_sentence = text.split('.')[0].split('!')[0].split('?')[0].strip()
-                    if len(first_sentence) > 5 and len(first_sentence) <= 80:
-                        title = first_sentence
+                # Remove assistant response suffixes
+                text_clean = re.sub(r'\s*\.\s*Assistant provided guidance.*$', '', text_clean, flags=re.IGNORECASE)
+                text_clean = re.sub(r'\s*\.\s*Assistant.*$', '', text_clean, flags=re.IGNORECASE)
+                text_clean = re.sub(r'\s*Thanks.*$', '', text_clean, flags=re.IGNORECASE)
+                
+                # Remove "User asked:" prefix if present
+                text_clean = re.sub(r'^User asked:\s*', '', text_clean, flags=re.IGNORECASE)
+                
+                # Extract event keywords and create brief title
+                event_keywords = {
+                    'birthday': ['birthday', 'birth day'],
+                    'exam': ['exam', 'examination', 'test', 'midterm', 'final'],
+                    'meeting': ['meeting', 'conference', 'call'],
+                    'interview': ['interview'],
+                    'party': ['party', 'celebration'],
+                    'appointment': ['appointment'],
+                    'deadline': ['deadline', 'due date'],
+                    'trip': ['trip', 'travel', 'vacation'],
+                    'event': ['event', 'show', 'play', 'concert']
+                }
+                
+                text_lower = text_clean.lower()
+                found_keyword = None
+                for event_type, keywords in event_keywords.items():
+                    if any(kw in text_lower for kw in keywords):
+                        found_keyword = event_type
+                        break
+                
+                # Try to extract a brief description
+                # Pattern 1: "My daughter's birthday" -> "Birthday"
+                # Pattern 2: "exam for ML" -> "ML Exam"
+                # Pattern 3: "parent teacher meeting" -> "Parent Teacher Meeting"
+                
+                if found_keyword:
+                    # Try to extract the subject/modifier before the keyword
+                    if found_keyword == 'birthday':
+                        # Look for "X's birthday" or "birthday of X"
+                        match = re.search(r"(\w+(?:\s+\w+)*)'?s?\s+birthday", text_clean, re.IGNORECASE)
+                        if match:
+                            subject = match.group(1).strip()
+                            # Capitalize first letter of each word
+                            subject = ' '.join(word.capitalize() for word in subject.split())
+                            title = f"{subject}'s Birthday"
+                        else:
+                            title = "Birthday"
+                    elif found_keyword == 'exam':
+                        # Look for "exam for X" or "X exam"
+                        match = re.search(r"(?:exam\s+for|exam\s+in)\s+(\w+(?:\s+\w+)*)", text_clean, re.IGNORECASE) or \
+                                re.search(r"(\w+(?:\s+\w+)*)\s+exam", text_clean, re.IGNORECASE)
+                        if match:
+                            subject = match.group(1).strip().upper()
+                            title = f"{subject} Exam"
+                        else:
+                            title = "Exam"
+                    elif found_keyword == 'meeting':
+                        # Extract meeting type
+                        match = re.search(r"(\w+(?:\s+\w+)*)\s+meeting", text_clean, re.IGNORECASE)
+                        if match:
+                            meeting_type = match.group(1).strip()
+                            meeting_type = ' '.join(word.capitalize() for word in meeting_type.split())
+                            title = f"{meeting_type} Meeting"
+                        else:
+                            title = "Meeting"
                     else:
-                        # Just use first 60 chars, clean up
-                        title = text[:60].strip()
-                        # Remove common prefixes
-                        title = re.sub(r'^(User asked:|Assistant|Important:)\s*', '', title, flags=re.IGNORECASE)
-                        if len(title) > 60:
-                            title = title[:60].rstrip() + "…"
+                        # Generic: capitalize the keyword
+                        title = found_keyword.capitalize()
+                else:
+                    # No keyword found, extract first meaningful phrase
+                    # Remove date/time references
+                    text_clean = re.sub(r'\s+(?:on|at|tomorrow|next week|next month|coming up).*$', '', text_clean, flags=re.IGNORECASE)
+                    # Get first sentence or phrase
+                    first_part = text_clean.split('.')[0].split(',')[0].strip()
+                    # Limit to 50 chars
+                    if len(first_part) > 50:
+                        # Try to find a natural break point
+                        words = first_part.split()
+                        title_parts = []
+                        for word in words:
+                            if len(' '.join(title_parts + [word])) <= 50:
+                                title_parts.append(word)
+                            else:
+                                break
+                        title = ' '.join(title_parts)
+                        if len(title) < 5:
+                            title = first_part[:50]
+                    else:
+                        title = first_part
+                
+                # Final cleanup
+                title = title.strip()
+                # Remove trailing punctuation
+                title = re.sub(r'[.,;:!?]+$', '', title)
+                # Capitalize first letter
+                if title:
+                    title = title[0].upper() + title[1:] if len(title) > 1 else title.upper()
             
-            # Clean up title
+            # Clean up title - ensure it's brief
             title = title.strip()
-            if len(title) > 80:
-                title = title[:77] + "..."
+            if len(title) > 60:
+                # Truncate at word boundary
+                words = title.split()
+                title_parts = []
+                for word in words:
+                    if len(' '.join(title_parts + [word])) <= 57:
+                        title_parts.append(word)
+                    else:
+                        break
+                title = ' '.join(title_parts) + "..."
             if not title:
                 title = "Event"
             
@@ -838,10 +913,17 @@ def write_back_memories(user_id: str, role: str, user_message: str, llm_response
     """Write back memories from conversation with classification"""
     memory_ids = []
     
+    base_role = context_bundle.get("base_role") or role
+    
+    # Classify the USER MESSAGE directly to detect events (not the summary text)
+    # This ensures event detection works properly
+    user_classification = classify_memory(base_role, user_message)
+    
     # Create session summary memory
     summary_text = f"User asked: {user_message[:150]}. Assistant provided guidance on this topic."
-    base_role = context_bundle.get("base_role") or role
-    classification = classify_memory(base_role, summary_text)
+    
+    # Use classification from user message for event detection
+    classification = user_classification
     
     metadata = {
         'mode': role,  # mode key for strict UI separation
@@ -852,10 +934,20 @@ def write_back_memories(user_id: str, role: str, user_message: str, llm_response
         'durability': classification.get('durability', 'medium'),
         'expires_at': classification.get('expires_at')
     }
-    if classification.get('type'):
-        metadata['type'] = classification.get('type')
+    # Set event type and date from user message classification
+    if classification.get('type') == 'event':
+        metadata['type'] = 'event'
+        print(f"[Write Back] 🎯 Event detected in user message: {user_message[:80]}")
     if classification.get('event_date'):
         metadata['event_date'] = classification.get('event_date')
+        # If we have an event_date, ensure type is set to 'event'
+        if not metadata.get('type'):
+            metadata['type'] = 'event'
+        print(f"[Write Back] 📅 Event date extracted: {metadata['event_date']}")
+    
+    # Debug: Print classification results
+    if metadata.get('type') == 'event':
+        print(f"[Write Back] ✅ Memory will be created as EVENT with date: {metadata.get('event_date', 'N/A')}")
     
     # Check for duplicate memory before creating
     duplicate = check_duplicate_memory(user_id, role, user_message)
@@ -2125,6 +2217,63 @@ Summary:"""
         preview = extracted_text[:150].replace('\n', ' ')
         return f"Uploaded {file_type} file '{filename}': {preview}..."
 
+def generate_chunk_summary(chunk_text: str, filename: str, chunk_num: int, total_chunks: int, base_role: str) -> str:
+    """Generate a brief summary for a content chunk"""
+    try:
+        GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+        if not GEMINI_API_KEY:
+            # Fallback: extract first sentence or key phrase
+            first_sentence = chunk_text.split('.')[0].strip()
+            if len(first_sentence) > 100:
+                first_sentence = first_sentence[:97] + "..."
+            return f"Document '{filename}' - Part {chunk_num}/{total_chunks}: {first_sentence}"
+        
+        from google.genai import types
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        model_name = 'gemini-2.5-flash'
+        
+        # Truncate chunk if too long (keep first 3000 chars for summary)
+        chunk_preview = chunk_text[:3000] if len(chunk_text) > 3000 else chunk_text
+        
+        prompt = f"""Generate a brief, concise summary (1-2 sentences, max 100 characters) for this document chunk:
+
+Document: {filename}
+Part {chunk_num} of {total_chunks}
+
+Content:
+{chunk_preview}
+
+Summary (be very brief, focus on key topic/point):"""
+
+        response = client.models.generate_content(
+            model=model_name,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.3,
+                max_output_tokens=100
+            )
+        )
+        
+        summary = response.text.strip() if hasattr(response, 'text') else str(response).strip()
+        
+        # Ensure summary is brief
+        if len(summary) > 120:
+            summary = summary[:117] + "..."
+        
+        # Add chunk indicator if multiple chunks
+        if total_chunks > 1:
+            summary = f"[Part {chunk_num}/{total_chunks}] {summary}"
+        
+        return summary
+    except Exception as e:
+        print(f"[File Upload] Error generating chunk summary: {e}")
+        # Fallback: extract first meaningful sentence
+        first_sentence = chunk_text.split('.')[0].strip()
+        if len(first_sentence) > 100:
+            first_sentence = first_sentence[:97] + "..."
+        chunk_indicator = f"[Part {chunk_num}/{total_chunks}] " if total_chunks > 1 else ""
+        return f"{chunk_indicator}Document '{filename}': {first_sentence}"
+
 # File Upload Endpoint
 @app.route('/api/upload', methods=['POST'])
 def upload_file():
@@ -2175,7 +2324,6 @@ def upload_file():
             'filename': filename,
             'file_type': file_type,
             'file_size': file_metadata.get('file_size'),
-            'full_content': extracted_text,  # Store full content in metadata for search
             'createdAt': datetime.now(timezone.utc).isoformat(),
             'userId': user.id,
             'durability': classification.get('durability', 'medium'),
@@ -2197,6 +2345,7 @@ def upload_file():
         # 1. Create a summary memory for quick reference
         summary_metadata = metadata.copy()
         summary_metadata['is_summary'] = True
+        summary_metadata['full_content'] = extracted_text  # Store full content in summary metadata
         summary_result = create_memory(user.id, summary_text, summary_metadata, role=mode_key, extra_container_tags=extra_tags)
         if summary_result and summary_result.get('id'):
             memory_ids.append(summary_result['id'])
@@ -2228,20 +2377,24 @@ def upload_file():
         else:
             content_chunks = [extracted_text] if extracted_text.strip() else []
         
-        # Create a memory for each content chunk
+        # Create a memory for each content chunk with brief summaries
         for i, chunk in enumerate(content_chunks):
             if not chunk or len(chunk.strip()) < 10:
                 continue
-                
+            
+            # Generate brief summary for this chunk
+            chunk_summary = generate_chunk_summary(chunk, filename, i + 1, len(content_chunks), base_role)
+            
             chunk_metadata = metadata.copy()
             chunk_metadata['is_content'] = True
             chunk_metadata['chunk_index'] = i
             chunk_metadata['total_chunks'] = len(content_chunks)
+            chunk_metadata['full_content'] = chunk  # Store full chunk content in metadata
             if i == 0:
                 chunk_metadata['is_first_chunk'] = True
             
-            # Use chunk as memory text (actual content, not summary)
-            chunk_result = create_memory(user.id, chunk, chunk_metadata, role=mode_key, extra_container_tags=extra_tags)
+            # Use brief summary as memory text, full content in metadata
+            chunk_result = create_memory(user.id, chunk_summary, chunk_metadata, role=mode_key, extra_container_tags=extra_tags)
             if chunk_result and chunk_result.get('id'):
                 memory_ids.append(chunk_result['id'])
                 print(f"[File Upload] Created content memory chunk {i+1}/{len(content_chunks)}: {chunk_result.get('id')}")
@@ -2323,11 +2476,20 @@ def connect_connector(provider: str):
             'connectionId': auth_info.get('connectionId'),
             'requiresOAuth': auth_info.get('requiresOAuth', False)
         })
+    except ValueError as e:
+        # User-friendly error messages
+        print(f"Error connecting {provider}: {e}")
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 400
     except Exception as e:
         print(f"Error connecting {provider}: {e}")
         db.session.rollback()
         import traceback
         traceback.print_exc()
+        # Check if it's a 403 or similar HTTP error
+        error_str = str(e)
+        if '403' in error_str or 'Forbidden' in error_str:
+            return jsonify({'error': f'This connector requires a Supermemory Pro plan or is not available for your account.'}), 403
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/connectors/<provider>/callback', methods=['POST'])
