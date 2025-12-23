@@ -19,6 +19,9 @@ function Chat({ mode, modeLabel, userId }) {
   const pendingMessagesRef = useRef([])
   const fileInputRef = useRef(null)
   const proactiveLoadingRef = useRef(false)
+  const queuedMessagesRef = useRef([]) // Queue messages while response is generating
+  const currentRequestRef = useRef(null) // Store current request's abort controller
+  const currentMessagesRef = useRef([]) // Store messages from current request
 
   useEffect(() => {
     // Load per-mode chat history from localStorage (strict mode separation in UI)
@@ -254,26 +257,50 @@ function Chat({ mode, modeLabel, userId }) {
     sendMessage(messagesToSend)
   }
 
-  const sendMessage = async (messageArray) => {
+  const sendMessage = async (messageArray, isRetry = false) => {
     const userMessages = Array.isArray(messageArray) ? messageArray : [messageArray]
     
-    // Add user messages to chat
-    const userMessageObjects = userMessages.map(msg => ({
-      role: 'user',
-      content: msg,
-      timestamp: new Date()
-    }))
-    setMessages(prev => [...prev, ...userMessageObjects])
+    // Determine which messages to send
+    const messagesToSend = isRetry && currentMessagesRef.current.length > 0 
+      ? currentMessagesRef.current 
+      : userMessages
+    
+    // If this is not a retry, add user messages to chat and store them
+    if (!isRetry) {
+      const userMessageObjects = userMessages.map(msg => ({
+        role: 'user',
+        content: msg,
+        timestamp: new Date()
+      }))
+      setMessages(prev => [...prev, ...userMessageObjects])
+      currentMessagesRef.current = [...userMessages]
+    }
+    
     setInput('')
     setIsLoading(true)
+
+    // Create abort controller for this request
+    const abortController = new AbortController()
+    currentRequestRef.current = abortController
 
     try {
       const response = await api.post('/chat', {
         userId,
         mode,
-        messages: userMessages,
+        messages: messagesToSend,
         useSearch
+      }, {
+        signal: abortController.signal
       })
+
+      // Check if request was aborted
+      if (abortController.signal.aborted) {
+        return
+      }
+
+      // Clear current messages since request succeeded
+      currentMessagesRef.current = []
+      currentRequestRef.current = null
 
       // Add assistant replies as separate messages
       const assistantMessages = response.data.replies.map((reply, index) => ({
@@ -284,7 +311,18 @@ function Chat({ mode, modeLabel, userId }) {
       }))
 
       setMessages(prev => [...prev, ...assistantMessages])
+      setIsLoading(false)
     } catch (error) {
+      // Ignore abort errors
+      if (error.name === 'AbortError' || error.name === 'CanceledError') {
+        return
+      }
+
+      // Check if request was aborted
+      if (abortController.signal.aborted) {
+        return
+      }
+
       console.error('Error sending message:', error)
       let errorMessage = 'Sorry, I encountered an error. Please try again.'
       
@@ -310,17 +348,42 @@ function Chat({ mode, modeLabel, userId }) {
         content: errorMessage,
         timestamp: new Date()
       }])
-    } finally {
       setIsLoading(false)
+      currentMessagesRef.current = []
+      currentRequestRef.current = null
     }
   }
 
   const handleSubmit = async (e) => {
     e.preventDefault()
-    if (!input.trim() || isLoading) return
+    if (!input.trim() || uploading) return
     
     const messageText = input.trim()
     setInput('') // Clear input immediately
+    
+    // If a response is currently being generated, cancel it and combine messages
+    if (isLoading && currentRequestRef.current) {
+      // Abort the current request
+      currentRequestRef.current.abort()
+      currentRequestRef.current = null
+      
+      // Add the new message to the current messages list
+      currentMessagesRef.current.push(messageText)
+      
+      // Show the new message in chat immediately
+      setMessages(prev => [...prev, {
+        role: 'user',
+        content: messageText,
+        timestamp: new Date()
+      }])
+      
+      // Resend with all messages combined
+      setIsLoading(false) // Reset loading state
+      setTimeout(() => {
+        sendMessage([], true) // Pass empty array since messages are in currentMessagesRef
+      }, 50)
+      return
+    }
     
     // Clear any pending timeout
     if (timeoutRef.current) {
@@ -334,6 +397,7 @@ function Chat({ mode, modeLabel, userId }) {
     // Clear pending messages (both ref and state)
     pendingMessagesRef.current = []
     setPendingMessages([])
+    currentMessagesRef.current = [] // Reset current messages
     
     // Send all messages immediately
     sendMessage(allMessages)
@@ -342,7 +406,7 @@ function Chat({ mode, modeLabel, userId }) {
   const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      if (input.trim() && !isLoading) {
+      if (input.trim() && !uploading) {
         handleSubmit(e) // Use the same logic as form submit
       }
     }
@@ -542,10 +606,15 @@ function Chat({ mode, modeLabel, userId }) {
             onKeyDown={handleKeyDown}
             onFocus={ensureProactiveIfNeeded}
             placeholder="Type your message..."
-            disabled={isLoading || uploading}
+            disabled={uploading}
+            style={{
+              opacity: isLoading ? 0.7 : 1,
+              cursor: isLoading ? 'text' : 'text'
+            }}
+            title={isLoading ? "Response generating... You can still type multiple messages" : ""}
           />
-          <button type="submit" disabled={isLoading || uploading || !input.trim()}>
-            Send
+          <button type="submit" disabled={uploading || !input.trim()}>
+            {isLoading ? 'Sending...' : 'Send'}
           </button>
         </form>
       </div>

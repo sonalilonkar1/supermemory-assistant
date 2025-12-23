@@ -8,7 +8,7 @@ import requests
 import json
 import uuid
 import re
-from typing import List, Dict
+from typing import List, Dict, Optional
 import importlib
 from calendar_routes import register_calendar_routes
 from models import db, User, Conversation, Message, Task, UserMode, Connector, UserProfile
@@ -798,6 +798,42 @@ def web_search(query, provider='parallel'):
         return web_search_parallel(query)
     return []
 
+def check_duplicate_memory(user_id: str, role: str, user_message: str) -> Optional[Dict]:
+    """Check if a similar memory already exists for this user message"""
+    try:
+        from services.supermemory_client import search_memories
+        
+        # Search for memories with similar user message context
+        # Use the first part of user message as search query
+        search_query = user_message[:100] if len(user_message) > 100 else user_message
+        existing_memories = search_memories(user_id, search_query, role=role, limit=5)
+        
+        # Check for exact or very similar matches
+        user_msg_lower = user_message.lower().strip()
+        user_msg_words = set(user_msg_lower.split())
+        
+        for mem in existing_memories:
+            mem_text = (mem.get('text') or mem.get('content') or '').lower()
+            # Check if memory contains "User asked:" pattern with similar message
+            if 'user asked:' in mem_text:
+                # Extract the user message from memory text
+                parts = mem_text.split('user asked:')
+                if len(parts) > 1:
+                    stored_msg = parts[1].split('.')[0].strip()[:150].lower()
+                    stored_words = set(stored_msg.split())
+                    
+                    # Calculate similarity: if >70% words match, consider it duplicate
+                    if len(user_msg_words) > 0:
+                        similarity = len(user_msg_words & stored_words) / len(user_msg_words)
+                        if similarity > 0.7 or stored_msg in user_msg_lower or user_msg_lower in stored_msg:
+                            print(f"[Write Back] Found duplicate memory: {mem.get('id')} (similarity: {similarity:.2f})")
+                            return mem
+        
+        return None
+    except Exception as e:
+        print(f"[Write Back] Error checking for duplicates: {e}")
+        return None
+
 def write_back_memories(user_id: str, role: str, user_message: str, llm_response: str, context_bundle: Dict) -> List[str]:
     """Write back memories from conversation with classification"""
     memory_ids = []
@@ -821,19 +857,49 @@ def write_back_memories(user_id: str, role: str, user_message: str, llm_response
     if classification.get('event_date'):
         metadata['event_date'] = classification.get('event_date')
     
-    print(f"[Write Back] Creating summary memory: {summary_text[:80]}...")
-    # IMPORTANT: role=mode key to keep containerTags mode-scoped
-    # Use defaultTags from mode config as extra container tags (for future boosting/filters)
-    mode_cfg = context_bundle.get("mode_config") or {}
-    extra_tags = []
-    for t in (mode_cfg.get("defaultTags") or []):
-        extra_tags.append(f"tag:{t}")
-    result = create_memory(user_id, summary_text, metadata, role=role, extra_container_tags=extra_tags)
-    if result and result.get('id'):
-        memory_ids.append(result['id'])
-        print(f"[Write Back] ✅ Summary memory created: {result.get('id')}")
-    else:
-        print(f"[Write Back] ❌ Summary memory creation failed (result: {result})")
+    # Check for duplicate memory before creating
+    duplicate = check_duplicate_memory(user_id, role, user_message)
+    
+    if duplicate:
+        print(f"[Write Back] ⚠️ Duplicate memory detected, updating existing: {duplicate.get('id')}")
+        # Update existing memory instead of creating new one
+        try:
+            from services.supermemory_client import SUPERMEMORY_API_URL, get_supermemory_headers
+            import requests
+            
+            memory_id = duplicate.get('id')
+            url = f'{SUPERMEMORY_API_URL}/memories/{memory_id}'
+            
+            # Update with new timestamp and response
+            updated_text = f"User asked: {user_message[:150]}. Assistant provided guidance on this topic."
+            payload = {
+                'text': updated_text,
+                'metadata': {**duplicate.get('metadata', {}), **metadata}
+            }
+            
+            response = requests.put(url, headers=get_supermemory_headers(), json=payload)
+            response.raise_for_status()
+            memory_ids.append(memory_id)
+            print(f"[Write Back] ✅ Updated existing memory: {memory_id}")
+        except Exception as e:
+            print(f"[Write Back] ❌ Failed to update duplicate memory: {e}")
+            # Fall through to create new memory if update fails
+            duplicate = None
+    
+    if not duplicate:
+        print(f"[Write Back] Creating summary memory: {summary_text[:80]}...")
+        # IMPORTANT: role=mode key to keep containerTags mode-scoped
+        # Use defaultTags from mode config as extra container tags (for future boosting/filters)
+        mode_cfg = context_bundle.get("mode_config") or {}
+        extra_tags = []
+        for t in (mode_cfg.get("defaultTags") or []):
+            extra_tags.append(f"tag:{t}")
+        result = create_memory(user_id, summary_text, metadata, role=role, extra_container_tags=extra_tags)
+        if result and result.get('id'):
+            memory_ids.append(result['id'])
+            print(f"[Write Back] ✅ Summary memory created: {result.get('id')}")
+        else:
+            print(f"[Write Back] ❌ Summary memory creation failed (result: {result})")
     
     # Extract important facts from response (simple heuristic)
     keywords = ['applied', 'deadline', 'exam', 'event', 'meeting']
