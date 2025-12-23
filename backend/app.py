@@ -447,16 +447,18 @@ def create_mode():
     data = request.json or {}
     name = (data.get('name') or '').strip()
     emoji = (data.get('emoji') or '✨').strip()
-    base_role = (data.get('baseRole') or 'student').strip()
     description = (data.get('description') or '').strip()
     default_tags = data.get('defaultTags') or []
     cross_sources = data.get('crossModeSources') or []
 
     if not name:
         return jsonify({'error': 'Mode name is required'}), 400
-    # If base_role not provided, default to mode key
-    if not base_role:
-        base_role = key
+
+    # Generate mode key from name
+    key = (data.get('key') or slugify_mode_key(name)).strip()
+    
+    # If base_role not provided, default to mode key (so each mode has its own baseRole)
+    base_role = (data.get('baseRole') or key).strip()
 
     # Normalize list fields
     if not isinstance(default_tags, list):
@@ -465,8 +467,6 @@ def create_mode():
     if not isinstance(cross_sources, list):
         cross_sources = []
     cross_sources = [str(s).strip() for s in cross_sources if str(s).strip()]
-
-    key = (data.get('key') or slugify_mode_key(name)).strip()
     # Allow template keys like 'student'/'parent'/'job' because templates are not auto-created.
     # Uniqueness is still enforced per user below.
 

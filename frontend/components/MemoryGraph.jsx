@@ -419,18 +419,22 @@ function MemoryGraph({ mode, modeLabel, userId }) {
   const [useAdvancedGraph, setUseAdvancedGraph] = useState(false)
   const [useCustomView, setUseCustomView] = useState(true)
   const [selectedNode, setSelectedNode] = useState(null)
+  const [combinedView, setCombinedView] = useState(false) // Toggle for combined/separate view
 
   useEffect(() => {
     loadGraphData()
-  }, [mode, userId])
+  }, [mode, userId, combinedView])
 
   const loadGraphData = async () => {
     try {
       setLoading(true)
       // Use the memory-graph endpoint which provides nodes and edges
-      const response = await api.get('/memory-graph', {
-        params: { role: mode, userId }
-      })
+      // If combinedView is true, don't pass role (or pass null) to get all modes
+      const params = { userId }
+      if (!combinedView) {
+        params.role = mode
+      }
+      const response = await api.get('/memory-graph', { params })
       
       if (response.data.nodes && response.data.edges) {
         setGraphData({
@@ -439,22 +443,26 @@ function MemoryGraph({ mode, modeLabel, userId }) {
         })
       } else {
         // Fallback to simple memories endpoint
-        const memoriesResponse = await api.get('/memories', {
-        params: { mode, userId }
-      })
+        const memoriesParams = { userId }
+        if (!combinedView) {
+          memoriesParams.mode = mode
+        }
+        const memoriesResponse = await api.get('/memories', { params: memoriesParams })
         const fetched = memoriesResponse.data.memories || []
-        const strict = fetched.filter(m => (m.metadata?.mode || null) === mode)
+        const strict = combinedView ? fetched : fetched.filter(m => (m.metadata?.mode || null) === mode)
         setMemories(strict)
       }
     } catch (error) {
       console.error('Error loading memory graph:', error)
       // Fallback to simple memories
       try {
-        const memoriesResponse = await api.get('/memories', {
-          params: { mode, userId }
-        })
+        const memoriesParams = { userId }
+        if (!combinedView) {
+          memoriesParams.mode = mode
+        }
+        const memoriesResponse = await api.get('/memories', { params: memoriesParams })
         const fetched = memoriesResponse.data.memories || []
-        const strict = fetched.filter(m => (m.metadata?.mode || null) === mode)
+        const strict = combinedView ? fetched : fetched.filter(m => (m.metadata?.mode || null) === mode)
         setMemories(strict)
       } catch (err) {
         console.error('Error loading memories:', err)
@@ -476,19 +484,22 @@ function MemoryGraph({ mode, modeLabel, userId }) {
     }))
 
     // Create relationships based on mode and time proximity
+    // In combined view, link memories across modes; in separate view, only within same mode
     const links = []
     for (let i = 0; i < nodes.length; i++) {
       for (let j = i + 1; j < nodes.length; j++) {
-        if (nodes[i].group === nodes[j].group) {
+        const sameMode = nodes[i].group === nodes[j].group
+        if (combinedView || sameMode) {
           const timeDiff = Math.abs(
             new Date(nodes[i].timestamp) - new Date(nodes[j].timestamp)
           )
-          // Link memories within 7 days
+          // Link memories within 7 days (across modes in combined view, same mode in separate view)
           if (timeDiff < 7 * 24 * 60 * 60 * 1000) {
             links.push({
               source: nodes[i].id,
               target: nodes[j].id,
-              value: 1
+              value: sameMode ? 2 : 1, // Stronger links within same mode
+              type: sameMode ? 'same-mode' : 'cross-mode'
             })
           }
         }
@@ -532,8 +543,25 @@ function MemoryGraph({ mode, modeLabel, userId }) {
   return (
     <div className={styles['memory-graph-container']}>
       <div className={styles['graph-header']}>
-        <h2>Memory Graph - {(modeLabel || mode).toString()} Mode</h2>
-        <div style={{ display: 'flex', gap: '0.5rem' }}>
+        <h2>Memory Graph - {combinedView ? 'All Modes' : `${(modeLabel || mode).toString()} Mode`}</h2>
+        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+          <button 
+            onClick={() => setCombinedView(!combinedView)}
+            className={styles['toggle-btn']}
+            style={{
+              background: combinedView ? '#10b981' : '#e5e7eb',
+              color: combinedView ? 'white' : '#111827',
+              border: `1px solid ${combinedView ? '#10b981' : '#e5e7eb'}`,
+              padding: '0.5rem 1rem',
+              borderRadius: '8px',
+              cursor: 'pointer',
+              fontWeight: 600,
+              fontSize: '0.875rem'
+            }}
+            title={combinedView ? 'Show only current mode' : 'Show all modes'}
+          >
+            {combinedView ? '🔗 Combined View' : '📊 Separate View'}
+          </button>
           <button 
             onClick={handleGraphToggle} 
             className={styles['toggle-btn']}

@@ -7,8 +7,9 @@ from typing import List, Dict, Optional
 from datetime import datetime, timezone
 from services.supermemory_client import get_supermemory_headers, SUPERMEMORY_API_URL
 
-# Supported connector providers
-SUPPORTED_PROVIDERS = ['gmail', 'linkedin', 'google-drive', 'notion', 'onedrive', 'web-crawler']
+# Supported connector providers (per current Supermemory API)
+# Note: Gmail/LinkedIn are not yet supported by the upstream API and will 400.
+SUPPORTED_PROVIDERS = ['notion', 'google-drive', 'onedrive', 'github', 'web-crawler']
 
 def get_connector_auth_url(user_id: str, provider: str, redirect_url: str) -> Dict:
     """

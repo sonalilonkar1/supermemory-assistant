@@ -8,7 +8,7 @@ function ModeSelector({ modes, currentMode, onModeChange, onModeCreated, onModeD
   const [isOpen, setIsOpen] = useState(false)
   const [name, setName] = useState('')
   const [emoji, setEmoji] = useState('✨')
-  const [baseRole, setBaseRole] = useState('student')
+  const [baseRole, setBaseRole] = useState('')
   const [description, setDescription] = useState('')
   const [defaultTags, setDefaultTags] = useState('') // comma-separated
   const [saving, setSaving] = useState(false)
@@ -36,7 +36,7 @@ function ModeSelector({ modes, currentMode, onModeChange, onModeCreated, onModeD
   const resetForm = () => {
     setName('')
     setEmoji('✨')
-    setBaseRole('student')
+    setBaseRole('')
     setDescription('')
     setDefaultTags('')
     setError('')
@@ -69,7 +69,8 @@ function ModeSelector({ modes, currentMode, onModeChange, onModeCreated, onModeD
     // Pre-fill but keep editable
     setName(t.name || '')
     setEmoji(t.emoji || '✨')
-    setBaseRole(t.baseRole || 'student')
+    // Auto-set baseRole to match template key (e.g., fitness template -> baseRole: "fitness")
+    setBaseRole(t.key || t.baseRole || '')
     setDescription(t.description || '')
     setDefaultTags(Array.isArray(t.defaultTags) ? t.defaultTags.join(', ') : '')
     setError('')
@@ -83,10 +84,14 @@ function ModeSelector({ modes, currentMode, onModeChange, onModeCreated, onModeD
     }
     try {
       setSaving(true)
+      // Auto-generate baseRole from mode name if not set (slugify: lowercase, replace spaces with hyphens)
+      const modeKey = name.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')
+      const finalBaseRole = baseRole || modeKey
+      
       const res = await api.post('/modes', {
         name: name.trim(),
         emoji: emoji.trim() || '✨',
-        baseRole,
+        baseRole: finalBaseRole,
         description: description.trim(),
         defaultTags: defaultTags
           .split(',')
@@ -373,24 +378,6 @@ function ModeSelector({ modes, currentMode, onModeChange, onModeCreated, onModeD
                   />
                 </label>
 
-                <label style={{ display: 'grid', gap: '0.35rem' }}>
-                  <span style={{ fontSize: '0.9rem', fontWeight: 600 }}>Base role (behavior)</span>
-                  <select
-                    value={baseRole}
-                    onChange={(e) => setBaseRole(e.target.value)}
-                    style={{
-                      padding: '0.65rem 0.75rem',
-                      borderRadius: '10px',
-                      border: '1px solid #e5e7eb',
-                      background: '#fff',
-                      color: '#111827',
-                    }}
-                  >
-                    <option value="student">Student</option>
-                    <option value="parent">Parent</option>
-                    <option value="job">Job</option>
-                  </select>
-                </label>
               </div>
 
               <label style={{ display: 'grid', gap: '0.35rem' }}>
