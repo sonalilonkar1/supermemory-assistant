@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import requests
 import json
 import uuid
+import re
 from typing import List, Dict
 import importlib
 from calendar_routes import register_calendar_routes
@@ -21,6 +22,8 @@ from auth import (
 )
 
 load_dotenv()
+
+N8N_WEBHOOK_SECRET = os.getenv('N8N_WEBHOOK_SECRET', '')
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', 'sqlite:///supermemory.db')
@@ -99,6 +102,26 @@ with app.app_context():
         db.session.rollback()
         print(f"[DB Migration] Skipping connectors table creation/migration: {e}")
 
+    # Clean legacy mode keys with random suffix (e.g., student-722f) if the base key is free
+    try:
+        modes = UserMode.query.all()
+        changed = False
+        for m in modes:
+            match = re.match(r"^(.*)-[0-9a-fA-F]{4}$", m.key or "")
+            if match:
+                base = match.group(1)
+                clash = UserMode.query.filter_by(user_id=m.user_id, key=base).first()
+                if not clash:
+                    old_key = m.key
+                    m.key = base
+                    changed = True
+                    print(f"[DB Migration] Renamed mode key {old_key} -> {base} for user {m.user_id}")
+        if changed:
+            db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        print(f"[DB Migration] Error normalizing mode keys: {e}")
+
 # Mode templates (suggestions). Not automatically created for a user.
 MODE_TEMPLATES = [
     {
@@ -118,7 +141,7 @@ MODE_TEMPLATES = [
         "name": "Parent / Family Planner",
         "emoji": "👨‍👩‍👧",
         "baseRole": "parent",
-        "description": "Family planning, kids' activities, scheduling, and household organization.",
+        "description": "Managing family activities, kids' schedules, and household organization.",
         "defaultTags": ["parent"],
         "crossModeSources": ["student"],
         "isCustom": False,
@@ -139,7 +162,7 @@ MODE_TEMPLATES = [
         "key": "fitness",
         "name": "Fitness / Health",
         "emoji": "💪",
-        "baseRole": "student",
+        "baseRole": "fitness",
         "description": "Workouts, habits, nutrition, and health routines.",
         "defaultTags": ["fitness", "health"],
         "crossModeSources": [],
@@ -150,7 +173,7 @@ MODE_TEMPLATES = [
         "key": "fashion",
         "name": "Fashion / Style",
         "emoji": "💅",
-        "baseRole": "student",
+        "baseRole": "fashion",
         "description": "Outfit planning, wardrobe, styling ideas, and shopping lists.",
         "defaultTags": ["fashion", "style"],
         "crossModeSources": [],
@@ -190,16 +213,29 @@ def resolve_mode(user_id: str, mode_key: str) -> Dict[str, any]:
     try:
         custom = UserMode.query.filter_by(user_id=user_id, key=mode_key).first()
         if custom:
-            base = custom.base_role if custom.base_role in ["student", "parent", "job"] else "student"
+            # Use the stored base_role, or default to mode_key if not set
+            base = custom.base_role if custom.base_role else mode_key
             import json
             try:
                 default_tags = json.loads(custom.default_tags) if custom.default_tags else []
             except Exception:
                 default_tags = []
             try:
-                cross_sources = json.loads(custom.cross_mode_sources) if custom.cross_mode_sources else []
+                stored_cross = json.loads(custom.cross_mode_sources) if custom.cross_mode_sources else []
             except Exception:
-                cross_sources = []
+                stored_cross = []
+
+            # If cross sources empty, default to all other modes (built-ins + user)
+            cross_sources = stored_cross
+            if not cross_sources:
+                other = set()
+                for t in MODE_TEMPLATES:
+                    if t["key"] != mode_key:
+                        other.add(t["key"])
+                for um in UserMode.query.filter_by(user_id=user_id).all():
+                    if um.key != mode_key:
+                        other.add(um.key)
+                cross_sources = list(other)
 
             return {
                 "modeKey": mode_key,
@@ -266,6 +302,21 @@ def upcoming_events():
     # Load all user-created modes
     user_modes = UserMode.query.filter_by(user_id=user.id).order_by(UserMode.created_at.asc()).all()
     mode_map = {m.key: {"name": m.name, "emoji": m.emoji or "✨"} for m in user_modes}
+    
+    # Also include template/default modes that might have memories
+    template_modes = {
+        "student": {"name": "Student Assistant", "emoji": "🎓"},
+        "parent": {"name": "Parent / Family Planner", "emoji": "👨‍👩‍👧"},
+        "job": {"name": "Job-Hunt Assistant", "emoji": "💼"},
+        "fitness": {"name": "Fitness / Health", "emoji": "💪"},
+        "fashion": {"name": "Fashion / Style", "emoji": "💅"},
+        "default": {"name": "Default", "emoji": "✨"},
+    }
+    
+    # Merge template modes into mode_map (user-created modes take precedence)
+    for key, meta in template_modes.items():
+        if key not in mode_map:
+            mode_map[key] = meta
 
     events = []
     for mode_key, meta in mode_map.items():
@@ -293,10 +344,74 @@ def upcoming_events():
                 continue
 
             text = mem.get('text') or mem.get('content') or ''
-            title = md.get('title') or (text[:80] + "…") if len(text) > 80 else text
+            
+            # Filter out assistant responses - only show events from user messages
+            text_lower = text.lower().strip()
+            # Skip if it's clearly an assistant response
+            assistant_patterns = [
+                'important:',  # Fact memories from assistant responses
+                'thanks for letting me know',
+                'assistant provided',
+                'i see you have',
+                'i noticed you',
+                'want me to',
+                'want to',
+            ]
+            if any(text_lower.startswith(pattern) for pattern in assistant_patterns):
+                continue
+            
+            # Only include events that start with "User asked:" (user messages) or don't have assistant indicators
+            if md.get('source') == 'chat' and not text_lower.startswith('user asked:'):
+                # If it's from chat but doesn't start with "User asked:", it's likely an assistant response
+                # Check if it contains common assistant response patterns
+                if any(pattern in text_lower for pattern in ['assistant', 'thanks', 'i can help', 'want me']):
+                    continue
+            
+            # Extract clean event title
+            title = md.get('title') or ''
+            if not title:
+                # Try to extract event name from text patterns
+                import re
+                # Patterns: "Event: X", "X on Y", "X - Y", "X meeting", "X exam"
+                patterns = [
+                    r'Event:\s*(.+?)(?:\.|$|on|at)',
+                    r'(.+?)\s+(?:on|at|tomorrow|next week|coming up)',
+                    r'(.+?)\s+(?:meeting|exam|interview|appointment|event)',
+                    r'^(.+?)(?:\s*-\s*.+)?$',  # First part before dash
+                ]
+                for pattern in patterns:
+                    match = re.search(pattern, text, re.IGNORECASE)
+                    if match:
+                        title = match.group(1).strip()
+                        # Clean up common prefixes
+                        title = re.sub(r'^(User asked:|Assistant|Important:)\s*', '', title, flags=re.IGNORECASE)
+                        if len(title) > 5 and len(title) < 100:
+                            break
+                
+                # Fallback: use first sentence or first 60 chars
+                if not title or len(title) < 5:
+                    # Get first sentence
+                    first_sentence = text.split('.')[0].split('!')[0].split('?')[0].strip()
+                    if len(first_sentence) > 5 and len(first_sentence) <= 80:
+                        title = first_sentence
+                    else:
+                        # Just use first 60 chars, clean up
+                        title = text[:60].strip()
+                        # Remove common prefixes
+                        title = re.sub(r'^(User asked:|Assistant|Important:)\s*', '', title, flags=re.IGNORECASE)
+                        if len(title) > 60:
+                            title = title[:60].rstrip() + "…"
+            
+            # Clean up title
+            title = title.strip()
+            if len(title) > 80:
+                title = title[:77] + "..."
+            if not title:
+                title = "Event"
+            
             events.append({
                 "id": mem.get('id'),
-                "title": title or "Event",
+                "title": title,
                 "date": dt.isoformat(),
                 "modeId": mode_key,
                 "modeName": meta["name"],
@@ -304,9 +419,23 @@ def upcoming_events():
                 "sourceText": text,
             })
 
-    events.sort(key=lambda e: e["date"])
+    # Deduplicate events: if multiple events have same date and similar titles, keep only one
+    deduplicated = []
+    seen = set()
+    for e in events:
+        # Create a key based on date and normalized title
+        date_key = e["date"][:10]  # Just the date part (YYYY-MM-DD)
+        title_normalized = e["title"].lower().strip()[:50]  # First 50 chars, normalized
+        dedup_key = f"{date_key}:{title_normalized}"
+        
+        # If we've seen a very similar event on the same date, skip it
+        if dedup_key not in seen:
+            seen.add(dedup_key)
+            deduplicated.append(e)
+    
+    deduplicated.sort(key=lambda e: e["date"])
     limit = int(request.args.get('limit', 50))
-    return jsonify({"events": events[:limit]})
+    return jsonify({"events": deduplicated[:limit]})
 
 @app.route('/api/modes', methods=['POST'])
 def create_mode():
@@ -325,8 +454,9 @@ def create_mode():
 
     if not name:
         return jsonify({'error': 'Mode name is required'}), 400
-    if base_role not in ['student', 'parent', 'job']:
-        base_role = 'student'
+    # If base_role not provided, default to mode key
+    if not base_role:
+        base_role = key
 
     # Normalize list fields
     if not isinstance(default_tags, list):
@@ -340,10 +470,34 @@ def create_mode():
     # Allow template keys like 'student'/'parent'/'job' because templates are not auto-created.
     # Uniqueness is still enforced per user below.
 
-    # Ensure unique per user
+    # Ensure unique per user; do NOT append random suffix. If it exists, return it.
     exists = UserMode.query.filter_by(user_id=user.id, key=key).first()
     if exists:
-        key = f"{key}-{uuid.uuid4().hex[:4]}"
+        return jsonify({
+            "mode": {
+                "id": exists.key,
+                "key": exists.key,
+                "name": exists.name,
+                "emoji": exists.emoji or "✨",
+                "baseRole": exists.base_role or "student",
+                "description": exists.description or "",
+                "defaultTags": json.loads(exists.default_tags or "[]"),
+                "crossModeSources": json.loads(exists.cross_mode_sources or "[]"),
+                "isCustom": True,
+            },
+            "warning": "Mode already exists; returning existing mode."
+        }), 200
+
+    # Auto-borrow from all existing modes (built-ins + user modes)
+    all_other_keys = set()
+    # built-in templates
+    for t in MODE_TEMPLATES:
+        if t["key"] != key:
+            all_other_keys.add(t["key"])
+    # user modes
+    for um in UserMode.query.filter_by(user_id=user.id).all():
+        if um.key != key:
+            all_other_keys.add(um.key)
 
     new_mode = UserMode(
         id=str(uuid.uuid4()),
@@ -354,7 +508,7 @@ def create_mode():
         base_role=base_role,
         description=description,
         default_tags=json.dumps(default_tags),
-        cross_mode_sources=json.dumps(cross_sources),
+        cross_mode_sources=json.dumps(list(all_other_keys)),
     )
     db.session.add(new_mode)
     db.session.commit()
@@ -375,20 +529,26 @@ def create_mode():
 
 @app.route('/api/modes/<mode_key>', methods=['DELETE'])
 def delete_mode(mode_key: str):
-    """Delete a custom mode (does not delete memories; only removes the mode from the selector)"""
+    """Delete a mode (does not delete memories; only removes the mode from the selector)"""
     user = get_user_from_token(request)
     if not user:
         return jsonify({'error': 'Unauthorized'}), 401
-    if mode_key in ['student', 'parent', 'job']:
-        return jsonify({'error': 'Cannot delete built-in modes'}), 400
+    
+    # Cannot delete core built-in modes
+    if mode_key in ['student', 'parent', 'job', 'default']:
+        return jsonify({'error': 'Cannot delete core built-in modes'}), 400
 
+    # Check if it's a custom mode
     mode = UserMode.query.filter_by(user_id=user.id, key=mode_key).first()
-    if not mode:
-        return jsonify({'error': 'Mode not found'}), 404
-
-    db.session.delete(mode)
-    db.session.commit()
-    return jsonify({'success': True})
+    if mode:
+        db.session.delete(mode)
+        db.session.commit()
+        return jsonify({'success': True, 'message': 'Mode deleted successfully'})
+    
+    # If not found as custom mode, it might be a template mode (fitness, fashion)
+    # These can be "deleted" by just not showing them (they're templates, not user data)
+    # But we should return success since the user wants to remove it from their view
+    return jsonify({'success': True, 'message': 'Mode removed from view'})
 
 # Configuration
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
@@ -693,10 +853,15 @@ def write_back_memories(user_id: str, role: str, user_message: str, llm_response
             'durability': fact_classification.get('durability', 'medium'),
             'expires_at': fact_classification.get('expires_at')
         }
-        if fact_classification.get('type'):
+        # Don't classify assistant responses as events - only user messages should be events
+        # Override event classification for assistant responses
+        if fact_classification.get('type') == 'event':
+            fact_metadata['type'] = 'fact'  # Keep as fact, not event
+        elif fact_classification.get('type'):
             fact_metadata['type'] = fact_classification.get('type')
-        if fact_classification.get('event_date'):
-            fact_metadata['event_date'] = fact_classification.get('event_date')
+        # Don't set event_date for assistant responses
+        # if fact_classification.get('event_date'):
+        #     fact_metadata['event_date'] = fact_classification.get('event_date')
         
         print(f"[Write Back] Creating fact memory: {fact_text[:80]}...")
         fact_result = create_memory(user_id, fact_text, fact_metadata, role=role, extra_container_tags=extra_tags)
@@ -810,6 +975,44 @@ def get_current_user():
     except Exception as e:
         print(f"Error getting current user: {e}")
         return jsonify({'error': 'Failed to get user'}), 500
+
+@app.route('/api/auth/delete-profile', methods=['DELETE'])
+def delete_user_profile():
+    """Delete user profile and all associated data"""
+    user = get_user_from_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    user_id = user.id
+    
+    try:
+        # Delete all user data
+        # 1. Delete user modes
+        UserMode.query.filter_by(user_id=user_id).delete()
+        
+        # 2. Delete connectors
+        Connector.query.filter_by(user_id=user_id).delete()
+        
+        # 3. Delete conversations and messages
+        conversations = Conversation.query.filter_by(user_id=user_id).all()
+        for conv in conversations:
+            Message.query.filter_by(conversation_id=conv.id).delete()
+        Conversation.query.filter_by(user_id=user_id).delete()
+        
+        # 4. Delete tasks
+        Task.query.filter_by(user_id=user_id).delete()
+        
+        # 5. Delete user account
+        db.session.delete(user)
+        db.session.commit()
+        
+        return jsonify({'success': True, 'message': 'User profile and all data deleted successfully'})
+    except Exception as e:
+        db.session.rollback()
+        print(f"[Delete Profile] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': f'Failed to delete profile: {str(e)}'}), 500
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
@@ -1033,46 +1236,153 @@ def update_profile():
 @app.route('/api/proactive', methods=['GET'])
 def proactive():
     """Generate proactive message based on recent memories"""
+    print(f"[Proactive] ===== PROACTIVE ENDPOINT CALLED =====")
+    print(f"[Proactive] Request URL: {request.url}")
+    print(f"[Proactive] Request args: {dict(request.args)}")
     try:
         # Get authenticated user or use default
         user = get_user_from_token(request)
         user_id = user.id if user else request.args.get('userId', 'default')
         
         mode_key = request.args.get('mode', 'student')
+        print(f"[Proactive] Requested mode: '{mode_key}', userId: {user_id}")
+        print(f"[Proactive] All request args: {dict(request.args)}")
         mode_info = resolve_mode(user_id, mode_key)
         mode_key = mode_info.get("modeKey", mode_key)
         mode_label = mode_info.get("label", mode_key)
+        base_role = mode_info.get("baseRole", mode_key)
+        print(f"[Proactive] Resolved mode_key: '{mode_key}', mode_label: '{mode_label}', base_role: '{base_role}'")
+        print(f"[Proactive] Mode info: {mode_info}")
         
         # Get recent memories
         from services.supermemory_client import get_recent_memories
         memories = get_recent_memories(user_id, role=mode_key, limit=10)
+        print(f"[Proactive] Found {len(memories)} recent memories")
         
+        # If no memories, generate a welcoming message instead of returning None
         if not memories:
-            return jsonify({'message': None})
+            print(f"[Proactive] No memories found, generating welcome message for {mode_label} mode")
+            welcome_messages = {
+                "student": "Hi! I'm here to help with your studies. What would you like to work on today?",
+                "parent": "Hello! I can help with managing family activities, kids' schedules, and household organization. What do you need assistance with?",
+                "job": "Hi there! I'm ready to help with your job search. What can I assist you with?",
+                "fitness": "Hey! I'm here to help with your fitness and health goals. What would you like to focus on today?",
+                "fitness-health": "Hey! I'm here to help with your fitness and health goals. What would you like to focus on today?",
+                "fashion": "Hi! I'm here to help with your fashion and style choices. What would you like to work on today?"
+            }
+            # Try mode_key first (most specific), then check if it contains keywords, then fallback to mode_label
+            # Don't use base_role as fallback since it might be "student" for fashion/fitness
+            welcome_msg = welcome_messages.get(mode_key) or \
+                         (welcome_messages.get("fitness") if mode_key and "fitness" in mode_key.lower() else None) or \
+                         (welcome_messages.get("fashion") if mode_key and "fashion" in mode_key.lower() else None) or \
+                         f"Hi! I'm your {mode_label} assistant. How can I help you today?"
+            print(f"[Proactive] Returning welcome message for mode_key='{mode_key}', base_role='{base_role}', mode_label='{mode_label}'")
+            print(f"[Proactive] Welcome message: '{welcome_msg}'")
+            print(f"[Proactive] Available keys in welcome_messages: {list(welcome_messages.keys())}")
+            return jsonify({'message': welcome_msg})
         
-        # Build context from recent memories
-        recent_context = '\n'.join([
-            f"- {mem.get('text', '')[:100]}"
-            for mem in memories[:5]
-        ])
+        # Build context from recent memories with metadata
+        recent_context = []
+        has_actionable_items = False
+        
+        for mem in memories[:5]:
+            text = mem.get('text', '')[:200]
+            metadata = mem.get('metadata', {})
+            event_date = metadata.get('event_date')
+            mem_type = metadata.get('type', 'memory')
+            
+            # Check if this memory has actionable content
+            text_lower = text.lower()
+            actionable_keywords = ['exam', 'test', 'deadline', 'meeting', 'event', 'interview', 'assignment', 
+                                 'schedule', 'plan', 'goal', 'pta', 'activity', 'appointment', 'next week',
+                                 'coming up', 'upcoming']
+            if event_date or mem_type == 'event' or any(kw in text_lower for kw in actionable_keywords):
+                has_actionable_items = True
+            
+            context_line = f"- {text}"
+            if event_date:
+                context_line += f" (Event date: {event_date})"
+            if mem_type == 'event':
+                context_line += " [EVENT]"
+            recent_context.append(context_line)
+        
+        recent_context_str = '\n'.join(recent_context)
+        
+        # If no actionable items found in memories, still try to generate a helpful message
+        # (but with a simpler prompt)
+        if not has_actionable_items and len(memories) > 0:
+            # Still generate a proactive message, but make it more general
+            print(f"[Proactive] No actionable items found, but {len(memories)} memories available - generating general proactive message")
+        
+        # Get mode-specific context (base_role already set above)
+        mode_description = mode_info.get("description", "")
+        
+        # Mode-specific proactive prompts
+        mode_prompts = {
+            "student": "You are a Student Assistant helping with homework, study planning, deadlines, and academic advice. Look for upcoming exams, assignments, study goals, or academic challenges. Suggest specific help like study plans, practice questions, or deadline reminders.",
+            "parent": "You are a Parent/Family Assistant helping with managing family activities, kids' schedules, and household organization. Look for upcoming events, family activities, scheduling needs, or organizational tasks. Suggest specific help like activity planning, schedule coordination, or family reminders.",
+            "job": "You are a Job-Hunt Assistant helping with job applications, interview prep, resume strategy, and networking. Look for job applications, interviews, networking opportunities, or career goals. Suggest specific help like interview prep, follow-up emails, or application strategies.",
+            "fitness": "You are a Fitness/Health Assistant helping with workouts, exercise routines, nutrition, health goals, and wellness planning. Look for workout schedules, fitness goals, health habits, nutrition plans, or wellness activities. Suggest specific help like workout plans, meal planning, habit tracking, or health reminders.",
+            "fashion": "You are a Fashion/Style Assistant helping with outfit planning, style choices, wardrobe organization, and fashion advice. Look for style questions, outfit needs, wardrobe planning, or fashion goals. Suggest specific help like outfit recommendations, wardrobe organization, style tips, or fashion inspiration."
+        }
+        
+        # Use mode-specific prompt if available, otherwise use base_role, otherwise use mode_label/description
+        if mode_key in mode_prompts:
+            base_prompt = mode_prompts[mode_key]
+        elif base_role in mode_prompts:
+            base_prompt = mode_prompts[base_role]
+        elif mode_description:
+            base_prompt = f"You are a {mode_label} Assistant. {mode_description} Look for relevant activities, goals, or tasks. Suggest specific help related to this mode."
+        else:
+            base_prompt = mode_prompts["student"]
         
         # Generate proactive suggestion
-        prompt = f"""Based on these recent memories in {mode_label} mode:
-{recent_context}
+        if has_actionable_items:
+            prompt = f"""{base_prompt}
 
-Generate a brief, helpful proactive message to start a conversation. Be specific and actionable.
+Recent memories in {mode_label} mode:
+{recent_context_str}
+
+CRITICAL RULES:
+1. Generate a SPECIFIC actionable message based on the memories above
+2. Reference a specific item from the memories (event name, exam subject, meeting type, etc.)
+3. Offer concrete help (create schedule, prepare questions, draft email, etc.)
+4. Be natural and conversational
+
+Good examples (specific and actionable):
+- "I see you have a machine learning exam next week. Want me to create a study schedule?"
+- "There's a PTA meeting coming up. Need help preparing questions or organizing your notes?"
+- "You have an interview scheduled. Want to practice common questions for that role?"
+- "I noticed you're planning a family activity. Want help organizing the schedule?"
+- "I see you're working on your fitness goals. Want me to create a workout plan?"
+- "You mentioned starting a new exercise routine. Need help tracking your progress?"
+
+Generate a helpful, specific proactive message. Make sure your response is complete and ends with a question or offer of help. Do not stop mid-sentence."""
+        else:
+            # More general prompt when no actionable items found
+            prompt = f"""{base_prompt}
+
+Recent memories in {mode_label} mode:
+{recent_context_str}
+
+Generate a helpful, conversational message that:
+1. References something from the recent memories
+2. Offers to help with a relevant task or question
+3. Is natural and not generic
+4. Is complete (at least 2-3 sentences)
+
 Examples:
-- Fitness: "You mentioned a workout goal this week. Want a 3-day plan?"
-- Student: "You mentioned a midterm next week. Want help planning revision?"
-- Job: "You applied to X jobs recently. Want to draft follow-up emails?"
+- "I see you've been discussing [topic from memories]. Want help with that?"
+- "Based on our recent conversation, I can help you [relevant action]. Interested?"
+- "I noticed [something specific from memories]. Want to explore that further?"
 
-Keep it to one sentence, friendly and helpful."""
+Generate a complete, helpful proactive message (at least 2-3 sentences). Do not stop mid-sentence."""
 
         if not client or not model_name:
             return jsonify({'message': None})
         
         try:
-            system_context = 'You are a helpful assistant that generates proactive conversation starters.'
+            system_context = f'You are a helpful assistant generating proactive conversation starters for {mode_label} mode. Be specific, actionable, and relevant to the user\'s actual context.'
             full_prompt = f"{system_context}\n\n{prompt}"
             
             from google.genai import types
@@ -1080,22 +1390,148 @@ Keep it to one sentence, friendly and helpful."""
                 model=model_name,
                 contents=full_prompt,
                 config=types.GenerateContentConfig(
-                    temperature=0.8,
-                    max_output_tokens=150,
+                    temperature=0.7,  # Slightly higher for more natural responses
+                    max_output_tokens=300,  # Increased further to prevent truncation
+                    top_p=0.95,
                 )
             )
-            # Extract text from response
-            message = response.text if hasattr(response, 'text') else str(response.candidates[0].content.parts[0].text)
+            # Extract text from response (handle all parts)
+            message = ""
+            finish_reason = None
+            
+            if hasattr(response, 'text'):
+                message = response.text
+            elif hasattr(response, 'candidates') and response.candidates:
+                candidate = response.candidates[0]
+                
+                # Check finish_reason
+                if hasattr(candidate, 'finish_reason'):
+                    finish_reason = candidate.finish_reason
+                    print(f"[Proactive] Finish reason: {finish_reason}")
+                
+                # Check for safety ratings
+                if hasattr(candidate, 'safety_ratings'):
+                    safety_ratings = candidate.safety_ratings
+                    print(f"[Proactive] Safety ratings: {safety_ratings}")
+                
+                if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                    # Join all parts
+                    message = ''.join([
+                        part.text for part in candidate.content.parts 
+                        if hasattr(part, 'text') and part.text
+                    ])
+                elif hasattr(candidate, 'content'):
+                    message = str(candidate.content)
+                else:
+                    message = str(candidate)
+            else:
+                message = str(response)
+            
             message = message.strip()
+            
+            # Log full message for debugging
+            print(f"[Proactive] Full message extracted ({len(message)} chars): {message}")
+            print(f"[Proactive] Finish reason: {finish_reason}")
+            
+            # Check if message seems incomplete (too short, no ending punctuation, or truncated)
+            is_incomplete = (
+                len(message) < 50 or  # Too short
+                (finish_reason and 'MAX_TOKENS' in str(finish_reason)) or  # Hit token limit
+                (not message.rstrip().endswith(('.', '!', '?')))  # No proper ending
+            )
+            
+            if is_incomplete:
+                print(f"[Proactive] Message seems incomplete ({len(message)} chars, finish_reason: {finish_reason}), using fallback")
+                # Generate a simpler fallback message based on memories
+                if memories and len(memories) > 0:
+                    first_memory_text = memories[0].get('text', '')[:100]
+                    # Extract key topic from memory
+                    if first_memory_text:
+                        # Simple extraction: take first 30-40 chars
+                        topic = first_memory_text[:40].replace('\n', ' ').strip()
+                        if len(topic) > 20:
+                            message = f"I noticed you mentioned something about {topic}... Want to discuss this further or need help with it?"
+                        else:
+                            message = f"I see you've been working on something. Want to continue or need help?"
+                    else:
+                        message = f"Hi! I'm here to help with {mode_label.lower()} tasks. What can I assist you with?"
+                else:
+                    message = f"Hi! I'm your {mode_label} assistant. How can I help you today?"
+            
+            # Filter out generic/non-actionable messages
+            if not message or len(message) < 10:
+                return jsonify({'message': None})
+            
+            # Check for "None" response
+            if message.lower().startswith('none'):
+                return jsonify({'message': None})
+            
+            # Reject only very generic patterns (be more lenient)
+            message_lower = message.lower()
+            very_generic_patterns = [
+                'want help with something',
+                'need anything',
+                'can i help',
+                'how can i assist',
+                'anything i can do'
+            ]
+            # Only reject if message is very short and contains very generic patterns
+            if len(message) < 30 and any(pattern in message_lower for pattern in very_generic_patterns):
+                print(f"[Proactive] Rejecting very generic message: {message[:50]}")
+                return jsonify({'message': None})
+            
+            # Accept the message if it's reasonable length and not just "None"
+            print(f"[Proactive] Accepting proactive message: {message[:100]}")
         except Exception as e:
-            print(f"Error generating proactive message: {e}")
-            return jsonify({'message': None})
+            print(f"[Proactive] Error generating proactive message: {e}")
+            import traceback
+            traceback.print_exc()
+            # On error, return a fallback welcome message instead of None
+            welcome_messages = {
+                "student": "Hi! I'm here to help with your studies. What would you like to work on today?",
+                "parent": "Hello! I can help with managing family activities, kids' schedules, and household organization. What do you need assistance with?",
+                "job": "Hi there! I'm ready to help with your job search. What can I assist you with?",
+                "fitness": "Hey! I'm here to help with your fitness and health goals. What would you like to focus on today?",
+                "fitness-health": "Hey! I'm here to help with your fitness and health goals. What would you like to focus on today?"
+            }
+            fallback_msg = welcome_messages.get(mode_key) or \
+                          (welcome_messages.get("fitness") if mode_key and "fitness" in mode_key.lower() else None) or \
+                          (welcome_messages.get("fashion") if mode_key and "fashion" in mode_key.lower() else None) or \
+                          f"Hi! I'm your {mode_label} assistant. How can I help you today?"
+            print(f"[Proactive] Returning fallback message due to error: {fallback_msg}")
+            return jsonify({'message': fallback_msg})
         
         return jsonify({'message': message})
         
     except Exception as e:
-        print(f"Error in proactive endpoint: {e}")
-        return jsonify({'message': None})
+        print(f"[Proactive] Error in proactive endpoint: {e}")
+        import traceback
+        traceback.print_exc()
+        # Try to get mode info for fallback
+        try:
+            user = get_user_from_token(request)
+            user_id = user.id if user else request.args.get('userId', 'default')
+            mode_key = request.args.get('mode', 'student')
+            mode_info = resolve_mode(user_id, mode_key)
+            mode_key = mode_info.get("modeKey", mode_key)
+            mode_label = mode_info.get("label", mode_key)
+            base_role = mode_info.get("baseRole", mode_key)
+            
+            welcome_messages = {
+                "student": "Hi! I'm here to help with your studies. What would you like to work on today?",
+                "parent": "Hello! I can help with managing family activities, kids' schedules, and household organization. What do you need assistance with?",
+                "job": "Hi there! I'm ready to help with your job search. What can I assist you with?",
+                "fitness": "Hey! I'm here to help with your fitness and health goals. What would you like to focus on today?",
+                "fitness-health": "Hey! I'm here to help with your fitness and health goals. What would you like to focus on today?"
+            }
+            fallback_msg = welcome_messages.get(mode_key) or \
+                          (welcome_messages.get("fitness") if mode_key and "fitness" in mode_key.lower() else None) or \
+                          (welcome_messages.get("fashion") if mode_key and "fashion" in mode_key.lower() else None) or \
+                          f"Hi! I'm your {mode_label} assistant. How can I help you today?"
+            print(f"[Proactive] Returning fallback message from outer exception handler: {fallback_msg}")
+            return jsonify({'message': fallback_msg})
+        except:
+            return jsonify({'message': "Hi! How can I help you today?"})
 
 @app.route('/api/memories', methods=['GET'])
 def get_memories_endpoint():
@@ -1559,6 +1995,70 @@ def extract_entities(text: str, role: str) -> List[Dict]:
     
     return entities
 
+def generate_file_summary(extracted_text: str, filename: str, file_type: str, base_role: str) -> str:
+    """Generate a concise summary of file content using LLM"""
+    try:
+        GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+        if not GEMINI_API_KEY:
+            # Fallback: return a simple summary if LLM is not available
+            preview = extracted_text[:200].replace('\n', ' ')
+            return f"Uploaded {file_type} file '{filename}': {preview}..."
+        
+        from google.genai import types
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        model_name = 'gemini-2.5-flash'
+        
+        # Truncate text if too long (keep first 10000 chars for summary)
+        text_for_summary = extracted_text[:10000] if len(extracted_text) > 10000 else extracted_text
+        
+        prompt = f"""You are analyzing a {file_type} file named "{filename}".
+
+File content:
+\"\"\"{text_for_summary}\"\"\"
+
+Generate a concise summary (2-3 sentences, max 200 characters) describing what this file is about. Focus on:
+- Main topic or purpose
+- Key information or takeaways
+- What someone would need to know about this file
+
+Do not include the full content. Just a brief description.
+
+Summary:"""
+        
+        response = client.models.generate_content(
+            model=model_name,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.3,
+                max_output_tokens=150,
+            )
+        )
+        
+        # Extract text from response
+        if hasattr(response, 'text'):
+            summary = response.text.strip()
+        elif hasattr(response, 'candidates') and response.candidates:
+            candidate = response.candidates[0]
+            if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                summary = ''.join([part.text for part in candidate.content.parts if hasattr(part, 'text')]).strip()
+            else:
+                summary = str(candidate).strip()
+        else:
+            summary = str(response).strip()
+        
+        # Fallback if summary is too long or empty
+        if not summary or len(summary) > 300:
+            preview = extracted_text[:150].replace('\n', ' ')
+            summary = f"Uploaded {file_type} file '{filename}': {preview}..."
+        
+        return summary
+        
+    except Exception as e:
+        print(f"Error generating file summary: {e}")
+        # Fallback: return a simple summary
+        preview = extracted_text[:150].replace('\n', ' ')
+        return f"Uploaded {file_type} file '{filename}': {preview}..."
+
 # File Upload Endpoint
 @app.route('/api/upload', methods=['POST'])
 def upload_file():
@@ -1593,17 +2093,23 @@ def upload_file():
         mode_key = mode_info.get("modeKey", mode_key)
         base_role = mode_info.get("baseRole", mode_key)
         
-        # Classify memory
-        classification = classify_memory(base_role, extracted_text)
+        # Generate summary of file content
+        filename = file_metadata.get('filename', 'unknown')
+        file_type = file_metadata.get('file_type', 'document')
+        summary_text = generate_file_summary(extracted_text, filename, file_type, base_role)
         
-        # Create memory from extracted text
+        # Classify memory based on summary
+        classification = classify_memory(base_role, summary_text)
+        
+        # Create memory with summary as text, full content in metadata
         metadata = {
             'mode': mode_key,
             'base_role': base_role,
             'source': 'file_upload',
-            'filename': file_metadata.get('filename'),
-            'file_type': file_metadata.get('file_type'),
+            'filename': filename,
+            'file_type': file_type,
             'file_size': file_metadata.get('file_size'),
+            'full_content': extracted_text,  # Store full content in metadata for search
             'createdAt': datetime.now(timezone.utc).isoformat(),
             'userId': user.id,
             'durability': classification.get('durability', 'medium'),
@@ -1614,50 +2120,78 @@ def upload_file():
         if classification.get('event_date'):
             metadata['event_date'] = classification.get('event_date')
         
-        # Split large text into chunks if needed (max 5000 chars per memory)
-        memory_ids = []
-        text_chunks = []
-        if len(extracted_text) > 5000:
-            # Simple chunking by paragraphs
-            paragraphs = extracted_text.split('\n\n')
-            current_chunk = ''
-            for para in paragraphs:
-                if len(current_chunk) + len(para) + 2 > 5000:
-                    if current_chunk:
-                        text_chunks.append(current_chunk.strip())
-                    current_chunk = para
-                else:
-                    current_chunk += '\n\n' + para if current_chunk else para
-            if current_chunk:
-                text_chunks.append(current_chunk.strip())
-        else:
-            text_chunks = [extracted_text]
-        
-        # Create memories for each chunk
+        # Create memories from file content
         mode_cfg = mode_info or {}
         extra_tags = []
         for t in (mode_cfg.get("defaultTags") or []):
             extra_tags.append(f"tag:{t}")
         
-        for i, chunk in enumerate(text_chunks):
-            chunk_metadata = metadata.copy()
-            if len(text_chunks) > 1:
-                chunk_metadata['chunk_index'] = i
-                chunk_metadata['total_chunks'] = len(text_chunks)
+        memory_ids = []
+        
+        # 1. Create a summary memory for quick reference
+        summary_metadata = metadata.copy()
+        summary_metadata['is_summary'] = True
+        summary_result = create_memory(user.id, summary_text, summary_metadata, role=mode_key, extra_container_tags=extra_tags)
+        if summary_result and summary_result.get('id'):
+            memory_ids.append(summary_result['id'])
+            print(f"[File Upload] Created summary memory: {summary_result.get('id')}")
+        
+        # 2. Create content memories from the actual file content (chunked if large)
+        # Chunk large text into manageable pieces (max 4000 chars per memory for content)
+        content_chunks = []
+        if len(extracted_text) > 4000:
+            # Smart chunking: split by paragraphs, then by sentences if needed
+            paragraphs = extracted_text.split('\n\n')
+            current_chunk = ''
+            for para in paragraphs:
+                para = para.strip()
+                if not para:
+                    continue
+                    
+                # If adding this paragraph would exceed limit, save current chunk
+                if len(current_chunk) + len(para) + 2 > 4000:
+                    if current_chunk:
+                        content_chunks.append(current_chunk.strip())
+                    current_chunk = para
+                else:
+                    current_chunk += '\n\n' + para if current_chunk else para
             
-            result = create_memory(user.id, chunk, chunk_metadata, role=mode_key, extra_container_tags=extra_tags)
-            if result and result.get('id'):
-                memory_ids.append(result['id'])
+            # Add remaining chunk
+            if current_chunk:
+                content_chunks.append(current_chunk.strip())
+        else:
+            content_chunks = [extracted_text] if extracted_text.strip() else []
+        
+        # Create a memory for each content chunk
+        for i, chunk in enumerate(content_chunks):
+            if not chunk or len(chunk.strip()) < 10:
+                continue
+                
+            chunk_metadata = metadata.copy()
+            chunk_metadata['is_content'] = True
+            chunk_metadata['chunk_index'] = i
+            chunk_metadata['total_chunks'] = len(content_chunks)
+            if i == 0:
+                chunk_metadata['is_first_chunk'] = True
+            
+            # Use chunk as memory text (actual content, not summary)
+            chunk_result = create_memory(user.id, chunk, chunk_metadata, role=mode_key, extra_container_tags=extra_tags)
+            if chunk_result and chunk_result.get('id'):
+                memory_ids.append(chunk_result['id'])
+                print(f"[File Upload] Created content memory chunk {i+1}/{len(content_chunks)}: {chunk_result.get('id')}")
+        
+        print(f"[File Upload] Created {len(memory_ids)} memories from file '{filename}' ({len(extracted_text)} chars)")
         
         return jsonify({
             'success': True,
             'memoryIds': memory_ids,
             'fileMetadata': {
-                'filename': file_metadata.get('filename'),
-                'fileType': file_metadata.get('file_type'),
+                'filename': filename,
+                'fileType': file_type,
                 'fileSize': file_metadata.get('file_size'),
                 'textLength': file_metadata.get('text_length'),
-                'chunksCreated': len(text_chunks)
+                'summary': summary_text,
+                'chunksCreated': len(content_chunks) + 1  # +1 for summary
             }
         }), 201
         
@@ -1813,6 +2347,115 @@ def disconnect_connector(provider: str):
     except Exception as e:
         print(f"Error disconnecting {provider}: {e}")
         db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+# --- n8n ingest webhook (for unsupported connectors like Gmail/LinkedIn/Calendar) ---
+@app.route('/api/n8n/ingest', methods=['POST'])
+def ingest_from_n8n():
+    """
+    Accepts batched items from an n8n workflow and creates memories.
+    Expected JSON:
+    {
+      "userId": "<user-id>",
+      "mode": "default",
+      "source": "gmail|linkedin|calendar|n8n",
+      "items": [
+        {
+          "title": "...",
+          "text": "...",
+          "metadata": {...},
+          "event_date": "YYYY-MM-DD",
+          "type": "event|memory|document"
+        }
+      ]
+    }
+    Headers: X-N8N-SECRET must match env N8N_WEBHOOK_SECRET (if set).
+    """
+    try:
+        if N8N_WEBHOOK_SECRET:
+            provided = request.headers.get('X-N8N-SECRET')
+            if provided != N8N_WEBHOOK_SECRET:
+                return jsonify({'error': 'Unauthorized'}), 401
+
+        data = request.json or {}
+        user_id = data.get('userId') or data.get('user_id')
+        if not user_id:
+            return jsonify({'error': 'userId is required'}), 400
+
+        mode_key = data.get('mode') or 'default'
+        source = data.get('source') or 'n8n'
+        items = data.get('items') or []
+        if not isinstance(items, list) or len(items) == 0:
+            return jsonify({'error': 'items must be a non-empty list'}), 400
+
+        # Resolve mode config (cross-mode tags, etc.)
+        mode_info = resolve_mode(user_id, mode_key) or {}
+        mode_key = mode_info.get("modeKey", mode_key)
+        base_role = mode_info.get("baseRole", mode_key)
+        extra_tags = []
+        for t in (mode_info.get("defaultTags") or []):
+            extra_tags.append(f"tag:{t}")
+
+        created_ids = []
+        errors = []
+
+        for idx, item in enumerate(items):
+            text = item.get('text') or item.get('content') or item.get('body') or ''
+            title = item.get('title') or item.get('subject') or ''
+            if title and title not in (text or ''):
+                text = f"{title}\n\n{text}".strip()
+
+            if not text:
+                errors.append({'index': idx, 'error': 'missing text'})
+                continue
+
+            metadata = (item.get('metadata') or {}).copy()
+            metadata.update({
+                'mode': mode_key,
+                'base_role': base_role,
+                'source': item.get('source') or source,
+                'via': 'n8n',
+                'userId': user_id
+            })
+
+            if item.get('event_date'):
+                metadata['event_date'] = item.get('event_date')
+                metadata.setdefault('type', 'event')
+            if item.get('type'):
+                metadata['type'] = item.get('type')
+
+            # Classify to set durability/expiry/type if not provided
+            classification = classify_memory(base_role, text)
+            for k in ['durability', 'expires_at', 'type', 'event_date']:
+                if classification.get(k) and k not in metadata:
+                    metadata[k] = classification[k]
+
+            try:
+                result = create_memory(
+                    user_id,
+                    text,
+                    metadata,
+                    role=mode_key,
+                    extra_container_tags=extra_tags
+                )
+                if result and result.get('id'):
+                    created_ids.append(result['id'])
+                else:
+                    errors.append({'index': idx, 'error': 'create_memory failed'})
+            except Exception as e:
+                errors.append({'index': idx, 'error': str(e)})
+
+        status = 207 if errors else 201
+        return jsonify({
+            'created': len(created_ids),
+            'ids': created_ids,
+            'errors': errors
+        }), status
+    except Exception as e:
+        print(f"Error ingesting from n8n: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 

@@ -4,21 +4,9 @@ import React, { useState, useEffect } from 'react'
 import api from '@/lib/axios'
 import styles from '@/styles/Connectors.module.css'
 
+const SUPPORTED_PROVIDERS = ['notion', 'google-drive', 'onedrive', 'web-crawler', 'github']
+
 const CONNECTOR_PROVIDERS = [
-  {
-    id: 'gmail',
-    name: 'Gmail',
-    emoji: '📧',
-    description: 'Import emails and conversations to build your profile',
-    color: '#EA4335'
-  },
-  {
-    id: 'linkedin',
-    name: 'LinkedIn',
-    emoji: '💼',
-    description: 'Import your profile, work experience, and education',
-    color: '#0077B5'
-  },
   {
     id: 'google-drive',
     name: 'Google Drive',
@@ -46,6 +34,13 @@ const CONNECTOR_PROVIDERS = [
     emoji: '🕷️',
     description: 'Crawl websites and import content',
     color: '#6366F1'
+  },
+  {
+    id: 'github',
+    name: 'GitHub',
+    emoji: '🐙',
+    description: 'Ingest issues and repos (via Supermemory connector)',
+    color: '#24292e'
   }
 ]
 
@@ -79,6 +74,11 @@ function Connectors({ userId }) {
   }
 
   const handleConnect = async (provider) => {
+    if (!SUPPORTED_PROVIDERS.includes(provider)) {
+      alert(`${provider} connector is not yet supported by the Supermemory API. Coming soon.`);
+      setConnecting(null)
+      return
+    }
     setConnecting(provider)
     try {
       const redirectUrl = `${window.location.origin}/connectors/callback`
@@ -144,8 +144,6 @@ function Connectors({ userId }) {
     }
   }
 
-  const handleDisconnect = async (provider) => {
-
   const handleCalendarUpload = async (file) => {
     if (!file) return
     setCalendarUploading(true)
@@ -166,6 +164,7 @@ function Connectors({ userId }) {
     }
   }
 
+  const handleDisconnect = async (provider) => {
     if (!confirm(`Are you sure you want to disconnect ${provider}?`)) {
       return
     }
@@ -205,6 +204,7 @@ function Connectors({ userId }) {
           const isPending = status === 'pending'
           const isConnecting = connecting === provider.id
           const isSyncing = syncing === provider.id
+          const comingSoon = provider.comingSoon === true
 
           return (
             <div
@@ -224,6 +224,7 @@ function Connectors({ userId }) {
               </div>
 
               <p className={styles.description}>{provider.description}</p>
+              {comingSoon && <div className={styles.comingSoon}>Coming soon</div>}
 
               {connector?.lastSyncAt && (
                 <div className={styles.lastSync}>
@@ -235,11 +236,11 @@ function Connectors({ userId }) {
                 {!isConnected && !isPending && (
                   <button
                     onClick={() => handleConnect(provider.id)}
-                    disabled={isConnecting || isSyncing}
+                    disabled={isConnecting || isSyncing || comingSoon}
                     className={styles.connectButton}
                     style={{ backgroundColor: provider.color }}
                   >
-                    {isConnecting ? 'Connecting...' : 'Connect'}
+                    {comingSoon ? 'Unavailable' : isConnecting ? 'Connecting...' : 'Connect'}
                   </button>
                 )}
 
@@ -286,6 +287,17 @@ function Connectors({ userId }) {
             </span>
           </div>
           <p className={styles.description}>Import events from an ICS file to create event memories.</p>
+          <div style={{ fontSize: '0.8rem', color: '#6b7280', marginTop: '0.5rem', padding: '0.75rem', background: '#f9fafb', borderRadius: '8px' }}>
+            <strong>How to get .ics file:</strong>
+            <ul style={{ margin: '0.5rem 0 0 1.25rem', padding: 0 }}>
+              <li><strong>Google Calendar:</strong> Settings → Import & export → Export</li>
+              <li><strong>Apple Calendar:</strong> File → Export → Export...</li>
+              <li><strong>Outlook:</strong> Settings → Calendar → Publish calendar → Copy ICS link</li>
+            </ul>
+            <div style={{ marginTop: '0.5rem', fontSize: '0.75rem' }}>
+              💡 Tip: For automated sync, use n8n workflow (see docs)
+            </div>
+          </div>
           <div className={styles.actions}>
             <input
               type="file"

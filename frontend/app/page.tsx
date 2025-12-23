@@ -80,9 +80,36 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab])
 
+  const [deleteProfileConfirm, setDeleteProfileConfirm] = useState(false)
+  const [deletingProfile, setDeletingProfile] = useState(false)
+
   const handleLogout = () => {
     clearAuth()
     router.push('/login')
+  }
+
+  const handleDeleteProfile = async () => {
+    if (!deleteProfileConfirm) {
+      setDeleteProfileConfirm(true)
+      return
+    }
+    
+    if (!confirm('Are you sure you want to delete your profile? This will permanently delete all your data including modes, memories, conversations, and cannot be undone.')) {
+      setDeleteProfileConfirm(false)
+      return
+    }
+    
+    try {
+      setDeletingProfile(true)
+      await api.delete('/auth/delete-profile')
+      clearAuth()
+      router.push('/login')
+    } catch (e) {
+      alert(e?.response?.data?.error || 'Failed to delete profile')
+      setDeleteProfileConfirm(false)
+    } finally {
+      setDeletingProfile(false)
+    }
   }
 
   if (loading) {
@@ -122,6 +149,24 @@ export default function Home() {
                 }}
               >
                 🚪 Logout
+              </button>
+              <button
+                onClick={handleDeleteProfile}
+                disabled={deletingProfile}
+                style={{
+                  padding: '0.5rem 1rem',
+                  background: deleteProfileConfirm ? '#dc2626' : 'rgba(220, 38, 38, 0.2)',
+                  border: '1px solid rgba(220, 38, 38, 0.3)',
+                  borderRadius: '8px',
+                  color: 'white',
+                  cursor: deletingProfile ? 'not-allowed' : 'pointer',
+                  fontSize: '0.85rem',
+                  fontWeight: 500,
+                  opacity: deletingProfile ? 0.6 : 1,
+                }}
+                title={deleteProfileConfirm ? 'Click again to confirm delete profile' : 'Delete profile'}
+              >
+                {deleteProfileConfirm ? '⚠️ Confirm Delete' : '🗑️ Delete Profile'}
               </button>
             </div>
           </div>
@@ -181,6 +226,7 @@ export default function Home() {
                   setModes([createdMode])
                   setCurrentMode(createdMode.id)
                 }}
+                onModeDeleted={() => {}}
               />
             </div>
           </div>
@@ -222,6 +268,25 @@ export default function Home() {
             >
               🚪 Logout
             </button>
+            <button
+              onClick={handleDeleteProfile}
+              disabled={deletingProfile}
+              style={{
+                padding: '0.5rem 1rem',
+                background: deleteProfileConfirm ? '#dc2626' : 'rgba(220, 38, 38, 0.2)',
+                border: '1px solid rgba(220, 38, 38, 0.3)',
+                borderRadius: '8px',
+                color: 'white',
+                cursor: deletingProfile ? 'not-allowed' : 'pointer',
+                fontSize: '0.85rem',
+                fontWeight: 500,
+                opacity: deletingProfile ? 0.6 : 1,
+                transition: 'all 0.2s ease',
+              }}
+              title={deleteProfileConfirm ? 'Click again to confirm delete profile' : 'Delete profile'}
+            >
+              {deleteProfileConfirm ? '⚠️ Confirm Delete' : '🗑️ Delete Profile'}
+            </button>
           </div>
         </div>
         <ModeSelector
@@ -230,6 +295,24 @@ export default function Home() {
           onModeChange={setCurrentMode}
           onModeCreated={(createdMode: any) => {
             setModes((prev: any[]) => [...prev, createdMode])
+          }}
+          onModeDeleted={(deletedModeId: string) => {
+            setModes((prev: any[]) => prev.filter((m: any) => m.id !== deletedModeId))
+            // Reload modes to get updated list
+            const loadModes = async () => {
+              try {
+                const res = await api.get('/modes')
+                const fetched = res.data?.modes
+                const list = Array.isArray(fetched) ? fetched : []
+                setModes(list)
+                if (list.length && currentMode === deletedModeId) {
+                  setCurrentMode(list[0].id)
+                }
+              } catch (e) {
+                setModes([])
+              }
+            }
+            loadModes()
           }}
         />
       </header>
@@ -367,27 +450,45 @@ export default function Home() {
               </div>
             ) : (
               <div style={{ marginTop: '1rem', display: 'grid', gap: '0.75rem' }}>
-                {events.map((e) => (
+                {events.map((e, idx) => (
                   <div
-                    key={e.id}
+                    key={e.id || `event-${idx}`}
                     style={{
                       background: 'white',
                       border: '1px solid #e9ecef',
                       borderRadius: 14,
-                      padding: '1rem',
+                      padding: '1rem 1.25rem',
                       boxShadow: '0 2px 10px rgba(0,0,0,0.06)',
                       display: 'flex',
                       justifyContent: 'space-between',
+                      alignItems: 'center',
                       gap: '1rem',
                     }}
                   >
-                    <div>
-                      <div style={{ fontWeight: 800 }}>{e.title}</div>
-                      <div style={{ fontSize: '0.9rem', color: '#6c757d', marginTop: '0.25rem' }}>
-                        {new Date(e.date).toLocaleString()}
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: 700, fontSize: '1rem', color: '#111827', marginBottom: '0.35rem' }}>
+                        {e.title || 'Event'}
+                      </div>
+                      <div style={{ fontSize: '0.875rem', color: '#6b7280' }}>
+                        📅 {new Date(e.date).toLocaleDateString('en-US', { 
+                          weekday: 'short', 
+                          year: 'numeric', 
+                          month: 'short', 
+                          day: 'numeric',
+                          hour: '2-digit',
+                          minute: '2-digit'
+                        })}
                       </div>
                     </div>
-                    <div style={{ alignSelf: 'center', fontWeight: 800 }}>
+                    <div style={{ 
+                      alignSelf: 'center', 
+                      fontWeight: 600,
+                      fontSize: '0.875rem',
+                      color: '#667eea',
+                      padding: '0.4rem 0.75rem',
+                      background: '#f3f4f6',
+                      borderRadius: '8px'
+                    }}>
                       {e.modeEmoji} {e.modeName}
                     </div>
                   </div>

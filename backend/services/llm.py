@@ -17,7 +17,7 @@ def build_prompt(role: str, message: str, ctx: Dict[str, Any]) -> str:
     """Build prompt for Gemini with context bundle"""
     
     role_descriptions = {
-        "parent": "Parent Planner - Help with family planning, kids' activities, scheduling, and family organization",
+        "parent": "Parent Planner - Help with managing family activities, kids' schedules, scheduling, and household organization",
         "student": "Student Coach - Help with homework, study planning, deadlines, and academic advice",
         "job": "Job-Hunt Assistant - Help with job applications, interview prep, career advice, and networking"
     }

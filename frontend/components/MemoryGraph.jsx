@@ -521,6 +521,10 @@ function MemoryGraph({ mode, modeLabel, userId }) {
     setSelectedNode(null)
   }
 
+  const handleRefresh = () => {
+    loadGraphData()
+  }
+
   const handleNodeSelect = (node) => {
     setSelectedNode(node)
   }
@@ -547,6 +551,13 @@ function MemoryGraph({ mode, modeLabel, userId }) {
           <button onClick={handleSimpleView} className={styles['refresh-btn']} style={{ background: '#e5e7eb', color: '#111827' }}>
           Simple View
         </button>
+          <button 
+            onClick={handleRefresh} 
+            className={styles['refresh-btn']} 
+            style={{ background: '#f3f4f6', color: '#111827' }}
+          >
+            🔄 Refresh
+          </button>
         </div>
       </div>
 
@@ -624,40 +635,10 @@ function MemoryGraph({ mode, modeLabel, userId }) {
                 </div>
               ))}
             </div>
-
-              <div className={styles['graph-legend']}>
-                <div className={styles['legend-item']}>
-                  <div className={`${styles['legend-color']} ${styles.student}`}></div>
-                <span>Student</span>
-              </div>
-                <div className={styles['legend-item']}>
-                  <div className={`${styles['legend-color']} ${styles.parent}`}></div>
-                <span>Parent</span>
-              </div>
-                <div className={styles['legend-item']}>
-                  <div className={`${styles['legend-color']} ${styles.job}`}></div>
-                <span>Job</span>
-                </div>
-              </div>
             </div>
-          )}
-
-          {!useAdvancedGraph && (
-            <div className={styles['graph-note']}>
-            <p>
-                💡 <strong>Tip:</strong> Click "✨ Use Advanced Graph" to enable interactive visualization with{' '}
-              <code>@supermemory/memory-graph</code> package.
-            </p>
-          </div>
           )}
         </div>
       )}
-    </div>
-  )
-}
-
-export default MemoryGraph
-
 
       {/* Detail Drawer for Custom View */}
       {useAdvancedGraph && useCustomView && selectedNode && (
@@ -684,3 +665,8 @@ export default MemoryGraph
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+export default MemoryGraph

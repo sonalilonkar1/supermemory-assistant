@@ -4,18 +4,19 @@ import React, { useEffect, useMemo, useState } from 'react'
 import api from '@/lib/axios'
 import styles from '@/styles/ModeSelector.module.css'
 
-function ModeSelector({ modes, currentMode, onModeChange, onModeCreated }) {
+function ModeSelector({ modes, currentMode, onModeChange, onModeCreated, onModeDeleted }) {
   const [isOpen, setIsOpen] = useState(false)
   const [name, setName] = useState('')
   const [emoji, setEmoji] = useState('✨')
   const [baseRole, setBaseRole] = useState('student')
   const [description, setDescription] = useState('')
   const [defaultTags, setDefaultTags] = useState('') // comma-separated
-  const [crossModeSources, setCrossModeSources] = useState([]) // array of mode keys
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [templates, setTemplates] = useState([])
   const [templatesLoaded, setTemplatesLoaded] = useState(false)
+  const [deleteConfirm, setDeleteConfirm] = useState(null)
+  const [deleting, setDeleting] = useState(false)
 
   if (!modes || modes.length === 0) {
     return <div style={{ color: 'white', padding: '1rem' }}>No modes available</div>
@@ -38,7 +39,6 @@ function ModeSelector({ modes, currentMode, onModeChange, onModeCreated }) {
     setBaseRole('student')
     setDescription('')
     setDefaultTags('')
-    setCrossModeSources([])
     setError('')
   }
 
@@ -72,7 +72,6 @@ function ModeSelector({ modes, currentMode, onModeChange, onModeCreated }) {
     setBaseRole(t.baseRole || 'student')
     setDescription(t.description || '')
     setDefaultTags(Array.isArray(t.defaultTags) ? t.defaultTags.join(', ') : '')
-    setCrossModeSources(Array.isArray(t.crossModeSources) ? t.crossModeSources : [])
     setError('')
   }
 
@@ -93,7 +92,6 @@ function ModeSelector({ modes, currentMode, onModeChange, onModeCreated }) {
           .split(',')
           .map(s => s.trim())
           .filter(Boolean),
-        crossModeSources,
       })
       const created = res.data?.mode
       if (created && onModeCreated) {
@@ -107,54 +105,136 @@ function ModeSelector({ modes, currentMode, onModeChange, onModeCreated }) {
       setSaving(false)
     }
   }
+
+  const handleDelete = async (modeId, modeName) => {
+    if (deleteConfirm !== modeId) {
+      setDeleteConfirm(modeId)
+      return
+    }
+    
+    try {
+      setDeleting(true)
+      // Use mode.key if available, otherwise use mode.id
+      const mode = modes.find(m => m.id === modeId)
+      const modeKey = mode?.key || modeId
+      await api.delete(`/modes/${modeKey}`)
+      if (onModeDeleted) {
+        onModeDeleted(modeId)
+      }
+      // If deleted mode was current, switch to first available mode
+      if (currentMode === modeId && modes.length > 1) {
+        const remainingModes = modes.filter(m => m.id !== modeId)
+        if (remainingModes.length > 0) {
+          onModeChange(remainingModes[0].id)
+        }
+      }
+      setDeleteConfirm(null)
+    } catch (e) {
+      setError(e?.response?.data?.error || e.message || 'Failed to delete mode')
+      setDeleteConfirm(null)
+    } finally {
+      setDeleting(false)
+    }
+  }
+  
+  const canDeleteMode = (modeId) => {
+    // Cannot delete core built-in modes
+    const mode = modes.find(m => m.id === modeId)
+    if (!mode) return false
+    
+    // Check both id and key fields
+    const modeKey = mode.key || mode.id
+    const protectedModes = ['student', 'parent', 'job', 'default']
+    
+    // Also check if it's marked as not custom (template mode)
+    if (mode.isCustom === false) {
+      return false
+    }
+    
+    return !protectedModes.includes(modeKey)
+  }
   
   return (
     <div className={styles['mode-selector']} style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
       {modes.map(mode => (
-        <button
+        <div
           key={mode.id}
-          className={`${styles['mode-button']} ${currentMode === mode.id ? styles.active : ''}`}
-          onClick={() => onModeChange(mode.id)}
-          type="button"
           style={{
+            position: 'relative',
             display: 'flex',
             alignItems: 'center',
-            gap: '0.625rem',
-            padding: '0.875rem 1.75rem',
-            border: '2px solid white',
-            background: currentMode === mode.id ? 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' : 'white',
-            color: currentMode === mode.id ? 'white' : '#667eea',
-            borderRadius: '12px',
-            cursor: 'pointer',
-            fontWeight: 700,
-            minWidth: '180px',
-            justifyContent: 'center',
-            boxShadow: currentMode === mode.id ? '0 4px 20px rgba(102, 126, 234, 0.4)' : '0 2px 10px rgba(0, 0, 0, 0.25)',
-            transition: 'all 0.3s ease',
-            fontSize: '0.95rem',
-            opacity: 1,
-            visibility: 'visible'
-          }}
-          onMouseEnter={(e) => {
-            if (currentMode !== mode.id) {
-              e.currentTarget.style.background = '#f8f9fa'
-              e.currentTarget.style.transform = 'translateY(-2px)'
-              e.currentTarget.style.boxShadow = '0 4px 16px rgba(0, 0, 0, 0.3)'
-            }
-          }}
-          onMouseLeave={(e) => {
-            if (currentMode !== mode.id) {
-              e.currentTarget.style.background = 'white'
-              e.currentTarget.style.transform = 'translateY(0)'
-              e.currentTarget.style.boxShadow = '0 2px 10px rgba(0, 0, 0, 0.25)'
-            } else {
-              e.currentTarget.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)'
-            }
+            gap: '0.5rem'
           }}
         >
-          <span style={{ fontSize: '1.3rem' }}>{mode.emoji}</span>
-          <span>{mode.name}</span>
-        </button>
+          <button
+            className={`${styles['mode-button']} ${currentMode === mode.id ? styles.active : ''}`}
+            onClick={() => onModeChange(mode.id)}
+            type="button"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.625rem',
+              padding: '0.875rem 1.75rem',
+              border: '2px solid white',
+              background: currentMode === mode.id ? 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' : 'white',
+              color: currentMode === mode.id ? 'white' : '#667eea',
+              borderRadius: '12px',
+              cursor: 'pointer',
+              fontWeight: 700,
+              minWidth: '180px',
+              justifyContent: 'center',
+              boxShadow: currentMode === mode.id ? '0 4px 20px rgba(102, 126, 234, 0.4)' : '0 2px 10px rgba(0, 0, 0, 0.25)',
+              transition: 'all 0.3s ease',
+              fontSize: '0.95rem',
+              opacity: 1,
+              visibility: 'visible'
+            }}
+            onMouseEnter={(e) => {
+              if (currentMode !== mode.id) {
+                e.currentTarget.style.background = '#f8f9fa'
+                e.currentTarget.style.transform = 'translateY(-2px)'
+                e.currentTarget.style.boxShadow = '0 4px 16px rgba(0, 0, 0, 0.3)'
+              }
+            }}
+            onMouseLeave={(e) => {
+              if (currentMode !== mode.id) {
+                e.currentTarget.style.background = 'white'
+                e.currentTarget.style.transform = 'translateY(0)'
+                e.currentTarget.style.boxShadow = '0 2px 10px rgba(0, 0, 0, 0.25)'
+              } else {
+                e.currentTarget.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)'
+              }
+            }}
+          >
+            <span style={{ fontSize: '1.3rem' }}>{mode.emoji}</span>
+            <span>{mode.name}</span>
+          </button>
+          {canDeleteMode(mode.id) && (
+            <button
+              type="button"
+              onClick={() => handleDelete(mode.id, mode.name)}
+              disabled={deleting}
+              style={{
+                padding: '0.5rem',
+                border: 'none',
+                background: deleteConfirm === mode.id ? '#dc2626' : 'transparent',
+                color: deleteConfirm === mode.id ? 'white' : '#6b7280',
+                borderRadius: '8px',
+                cursor: 'pointer',
+                fontSize: '1rem',
+                minWidth: '32px',
+                height: '32px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                transition: 'all 0.2s ease'
+              }}
+              title={deleteConfirm === mode.id ? 'Click again to confirm delete' : 'Delete mode'}
+            >
+              {deleteConfirm === mode.id ? '✓' : '🗑️'}
+            </button>
+          )}
+        </div>
       ))}
 
       <button
@@ -346,35 +426,6 @@ function ModeSelector({ modes, currentMode, onModeChange, onModeCreated }) {
                   }}
                 />
               </label>
-
-              <div style={{ display: 'grid', gap: '0.35rem' }}>
-                <span style={{ fontSize: '0.9rem', fontWeight: 600 }}>Cross-mode sources (borrow from)</span>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
-                  {availableBorrowSources.map((m) => (
-                    <label key={m.id} style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.9rem' }}>
-                      <input
-                        type="checkbox"
-                        checked={crossModeSources.includes(m.id)}
-                        onChange={(e) => {
-                          const checked = e.target.checked
-                          setCrossModeSources((prev) => {
-                            if (checked) return Array.from(new Set([...prev, m.id]))
-                            return prev.filter((x) => x !== m.id)
-                          })
-                        }}
-                      />
-                      <span>{m.emoji} {m.name}</span>
-                    </label>
-                  ))}
-                </div>
-                <span style={{ fontSize: '0.8rem', color: '#6b7280' }}>
-                  The assistant can pull a tiny, relevant slice from these modes during chat only (UI stays separated).
-                </span>
-              </div>
-
-              <p style={{ margin: 0, fontSize: '0.85rem', color: '#6b7280' }}>
-                Base role controls assistant behavior + profile slicing. Memories remain isolated to the new mode.
-              </p>
 
               {error && <div style={{ color: '#b91c1c', fontSize: '0.9rem' }}>{error}</div>}
 

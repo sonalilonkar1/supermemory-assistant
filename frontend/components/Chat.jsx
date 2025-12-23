@@ -10,9 +10,7 @@ function Chat({ mode, modeLabel, userId }) {
   const [isLoading, setIsLoading] = useState(false)
   const [useSearch, setUseSearch] = useState(false)
   const [showDebugTools, setShowDebugTools] = useState(true)
-  const [showProactive, setShowProactive] = useState(false)
   const [pendingMessages, setPendingMessages] = useState([])
-  const [proactiveMessage, setProactiveMessage] = useState(null)
   const [uploading, setUploading] = useState(false)
   const [selectedFile, setSelectedFile] = useState(null)
   const [dragActive, setDragActive] = useState(false)
@@ -20,6 +18,7 @@ function Chat({ mode, modeLabel, userId }) {
   const timeoutRef = useRef(null)
   const pendingMessagesRef = useRef([])
   const fileInputRef = useRef(null)
+  const proactiveLoadingRef = useRef(false)
 
   useEffect(() => {
     // Load per-mode chat history from localStorage (strict mode separation in UI)
@@ -27,14 +26,11 @@ function Chat({ mode, modeLabel, userId }) {
   }, [mode, userId])
 
   useEffect(() => {
-    // Proactive is optional and hidden by default (user-facing UX)
-    if (!showProactive) {
-      setProactiveMessage(null)
-      return
-    }
+    // Load proactive message when mode changes, userId changes, or when messages become empty
+    // This ensures proactive messages show when chat is empty
     loadProactiveMessage()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showProactive, mode, userId])
+  }, [mode, userId, messages.length])
 
   useEffect(() => {
     // Persist per-mode chat history so switching modes doesn't mix messages
@@ -171,16 +167,61 @@ function Chat({ mode, modeLabel, userId }) {
   }
 
   const loadProactiveMessage = async () => {
+    // Always load proactive message when mode changes, regardless of chat state
+    // But prevent duplicates within the same session
+    const hasProactive = messages.some(m => m.role === 'assistant' && m.isProactive)
+    
+    if (hasProactive || proactiveLoadingRef.current) {
+      console.log('[Proactive] Skipping - already has proactive or loading:', { hasProactive, loading: proactiveLoadingRef.current, messagesCount: messages.length })
+      return
+    }
+    
+    console.log('[Proactive] Loading proactive message for mode:', mode, 'Messages count:', messages.length)
+    
     try {
+      proactiveLoadingRef.current = true
+      console.log('[Proactive] Loading proactive message for mode:', mode, 'userId:', userId)
       const response = await api.get('/proactive', {
         params: { mode, userId }
       })
-      if (response.data.message) {
-        setProactiveMessage(response.data.message)
+      console.log('[Proactive] Response:', response.data)
+      if (response.data && response.data.message) {
+        // Add proactive message as a regular assistant message
+        const proactiveMsg = {
+          role: 'assistant',
+          content: response.data.message,
+          timestamp: new Date(),
+          isProactive: true
+        }
+        console.log('[Proactive] Adding proactive message:', proactiveMsg.content.substring(0, 50))
+        setMessages(prev => {
+          // Check again to avoid duplicates
+          const alreadyHas = prev.some(m => m.role === 'assistant' && m.isProactive)
+          if (alreadyHas) {
+            console.log('[Proactive] Duplicate detected, skipping')
+            return prev
+          }
+          console.log('[Proactive] Adding to messages')
+          return [proactiveMsg, ...prev]
+        })
+      } else {
+        console.log('[Proactive] No message in response:', response.data)
       }
     } catch (error) {
-      console.error('Error loading proactive message:', error)
+      console.error('[Proactive] Error loading proactive message:', error)
+      if (error.response) {
+        console.error('[Proactive] Response status:', error.response.status)
+        console.error('[Proactive] Response data:', error.response.data)
+      }
+    } finally {
+      proactiveLoadingRef.current = false
     }
+  }
+
+  const ensureProactiveIfNeeded = () => {
+    const hasProactive = messages.some(m => m.role === 'assistant' && m.isProactive)
+    if (hasProactive || proactiveLoadingRef.current) return
+    loadProactiveMessage()
   }
 
   const queueMessage = (text) => {
@@ -243,11 +284,6 @@ function Chat({ mode, modeLabel, userId }) {
       }))
 
       setMessages(prev => [...prev, ...assistantMessages])
-      
-      // Clear proactive message after first interaction
-      if (proactiveMessage) {
-        setProactiveMessage(null)
-      }
     } catch (error) {
       console.error('Error sending message:', error)
       let errorMessage = 'Sorry, I encountered an error. Please try again.'
@@ -331,9 +367,10 @@ function Chat({ mode, modeLabel, userId }) {
       
       if (response.data.success) {
         const fileMeta = response.data.fileMetadata
+        const memoryCount = response.data.memoryIds?.length || fileMeta.chunksCreated || 1
         setMessages(prev => [...prev, {
           role: 'assistant',
-          content: `✅ File "${fileMeta.filename}" uploaded successfully! Extracted ${fileMeta.textLength} characters and created ${fileMeta.chunksCreated} memory chunk(s).`,
+          content: `✅ File "${fileMeta.filename}" uploaded successfully! Extracted ${fileMeta.textLength} characters and created ${memoryCount} memory/memories from the file content.`,
           timestamp: new Date()
         }])
       }
@@ -397,15 +434,6 @@ function Chat({ mode, modeLabel, userId }) {
           <label className={styles['search-toggle']} style={{ opacity: 0.85 }}>
             <input
               type="checkbox"
-              checked={showProactive}
-              onChange={(e) => setShowProactive(e.target.checked)}
-            />
-            <span>Show Proactive</span>
-          </label>
-
-          <label className={styles['search-toggle']} style={{ opacity: 0.85 }}>
-            <input
-              type="checkbox"
               checked={showDebugTools}
               onChange={(e) => setShowDebugTools(e.target.checked)}
             />
@@ -415,37 +443,6 @@ function Chat({ mode, modeLabel, userId }) {
       </div>
 
       <div className={styles['chat-messages']}>
-        {proactiveMessage && (
-          <div className={`${styles.message} ${styles.proactive}`}>
-            <div className={styles['message-content']}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem' }}>
-                <span className={styles['proactive-label']}>Proactive</span>
-                <button
-                  type="button"
-                  onClick={() => setProactiveMessage(null)}
-                  style={{
-                    border: 'none',
-                    background: 'transparent',
-                    cursor: 'pointer',
-                    color: '#856404',
-                    fontWeight: 800,
-                    fontSize: '1rem',
-                    lineHeight: 1,
-                  }}
-                  aria-label="Dismiss proactive suggestion"
-                  title="Dismiss"
-                >
-                  ×
-                </button>
-              </div>
-              <div
-                style={{ marginTop: '0.25rem' }}
-                dangerouslySetInnerHTML={{ __html: renderMarkdownLite(proactiveMessage) }}
-              />
-            </div>
-          </div>
-        )}
-
         {messages.map((message, index) => (
           <div key={index} className={`${styles.message} ${styles[message.role]}`}>
             <div className={styles['message-content']}>
@@ -538,8 +535,12 @@ function Chat({ mode, modeLabel, userId }) {
           <input
             type="text"
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => {
+              setInput(e.target.value)
+              ensureProactiveIfNeeded()
+            }}
             onKeyDown={handleKeyDown}
+            onFocus={ensureProactiveIfNeeded}
             placeholder="Type your message..."
             disabled={isLoading || uploading}
           />

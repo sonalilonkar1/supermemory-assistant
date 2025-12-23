@@ -177,6 +177,18 @@
   width: 100%;
 }
 
+.comingSoon {
+  display: inline-block;
+  margin: 0.35rem 0 0.6rem;
+  padding: 0.25rem 0.6rem;
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #fbbf24;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
 .empty {
   text-align: center;
   padding: 3rem;

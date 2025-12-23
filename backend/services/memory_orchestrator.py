@@ -115,7 +115,7 @@ def get_cross_roles_for(role: str) -> List[str]:
     if role == "student":
         return ["job"]      # career goals can influence course planning
     if role == "parent":
-        return ["student"]  # schedules/exams can affect family planning
+        return ["student"]  # schedules/exams can affect family activities
     return []
 
 def build_cross_role_static(profile: Optional[UserProfile], role: str) -> Dict[str, Any]:
